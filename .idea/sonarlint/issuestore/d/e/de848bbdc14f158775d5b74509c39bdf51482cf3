@@ -1,11 +1,0 @@
-
-xpython:S3776{"TRefactor this function to reduce its Cognitive Complexity from 68 to the 15 allowed.(·ğ§Äùÿÿÿÿ8Ú²„œ·1
-ipython:S5720Ì"IRename "__pydantic_self__" to "self" or add the missing "self" parameter.(ë—Îæ8Ú²„œ·1
-ypython:S3776à"TRefactor this function to reduce its Cognitive Complexity from 35 to the 15 allowed.(‡Üêåşÿÿÿÿ8Ú²„œ·1
-|python:S5713£"WRemove this redundant Exception class; it derives from another which is already caught.(¥á¸úÿÿÿÿ8Û²„œ·1
-cpython:S930Ü"?Add 1 missing arguments; 'keys' expects 1 positional arguments.(…æÿ­ÿÿÿÿÿ8Û²„œ·1
-ypython:S3776«"TRefactor this function to reduce its Cognitive Complexity from 17 to the 15 allowed.(Ù¥ü¯şÿÿÿÿ8Û²„œ·1
-ypython:S3776Ù"TRefactor this function to reduce its Cognitive Complexity from 26 to the 15 allowed.(ùÔÒûÿÿÿÿ8Û²„œ·1
-ypython:S3776·"TRefactor this function to reduce its Cognitive Complexity from 30 to the 15 allowed.(ıÜ‚ßûÿÿÿÿ8Ü²„œ·1
-tpython:S3776¸"TRefactor this function to reduce its Cognitive Complexity from 22 to the 15 allowed.(ù’ö¨8Ü²„œ·1
-ypython:S3776ˆ"TRefactor this function to reduce its Cognitive Complexity from 55 to the 15 allowed.(½éİÿşÿÿÿÿ8Ü²„œ·1
