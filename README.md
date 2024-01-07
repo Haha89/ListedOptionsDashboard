@@ -18,10 +18,13 @@ These instructions will get you a copy of the project up and running on your loc
 1. Clone the repository
 ```git clone https://github.com/Haha89/OptionPricing```
 
-2. Build the docker container
+2. Go to the project folder
+   ```cd OptionPricing```
+
+3. Build the docker container
 ```docker-compose up -d --build```
 
-The app will be running on http://localhost:4200
+The web app will be running on http://localhost:4200
 
 # Data
 The Greek surface data is pulled from a data source of your choice, you can use an API or read it from a CSV file. You will need to modify the code accordingly to retrieve the data and pass it to the Plotly Scatter3d plot.
