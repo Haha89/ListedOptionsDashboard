@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+fastapi_utils
+scipy
+yfinance
+psycopg2
+prettytable
