@@ -7,35 +7,52 @@
             <form>
               <div class="row g-1 pb-2">
                 <div class="col">
-                  <p-fieldset>
-                    <span slot="label">Parameters</span>
+                  <p-fieldset [label]="'Parameters'">
                     <p-text-field-wrapper [label]="'Ticker'">
                       <input [type]="'text'" [name]="'ticker'" [value]="parameters.ticker" />
                     </p-text-field-wrapper>
                   </p-fieldset>
                 </div>
                 <div class="col-auto d-flex">
-                  <p-button type="submit" class="d-flex align-items-end" (click)="loadOptions()">Load</p-button>
+                  <p-button [hideLabel]="true" [icon]="'arrow-right'" type='button' class="mt-auto" (click)="loadOptions()">Some label</p-button>
                 </div>
+  
               </div>
 
               <p-segmented-control [value]="parameters.optionType" aria-label="Choose an option" id="opt2ionType"
                 (update)="onOptionTypeChange($event)" [columns]="2">
                 <p-segmented-control-item *ngFor="let f of ['Call', 'Put']" [value]="f">{{f}}</p-segmented-control-item>
               </p-segmented-control>
-
+              <div class="row py-2">
+                <p-checkbox-wrapper [label]="'Force refresh'" [hideLabel]="false" >
+                  <input [type]="'checkbox'" [name]="'refresh'"  [value]="parameters.refresh" (change)="onRefreshChange($event)"/>
+                </p-checkbox-wrapper>
+              </div>
+        
 
               <p-select-wrapper [label]="'Field:'" [hideLabel]="false">
                 <select id="field" [value]="parameters.field" (change)="onFieldChange($event)">
                   <option *ngFor="let f of fields" [value]="f">{{f.replace("_", " ") | titlecase}}</option>
                 </select>
               </p-select-wrapper>
+              
+              <div class="row g-1 pb-2">
+                <div class="col">
+                  <p-select-wrapper [label]="'Range (around spot):'" [hideLabel]="false">
+                    <select id="range" (change)="onRangeChange($event)">
+                      <option *ngFor="let f of ranges" [value]="f">+/- {{f}}%</option>
+                    </select>
+                  </p-select-wrapper>
+                </div>
+                <div class="col">
+                  <p-select-wrapper [label]="'Max Maturity (in Months):'" [hideLabel]="false">
+                    <select id="maxMat" (change)="onMaxMaturityChange($event)">
+                      <option *ngFor="let f of maturities" [value]="f">{{f}}M</option>
+                    </select>
+                  </p-select-wrapper>
+                </div>
 
-              <p-select-wrapper [label]="'Range (around spot):'" [hideLabel]="false">
-                <select id="range" (change)="onRangeChange($event)">
-                  <option *ngFor="let f of ranges" [value]="f">+/- {{f}}%</option>
-                </select>
-              </p-select-wrapper>
+              </div>
 
 
             </form>

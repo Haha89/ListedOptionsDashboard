@@ -52,7 +52,7 @@ class BaseOption:
     def price_with_black_scholes(self, vol: float) -> float:
         """ Placeholder, """
         print("This function should not be called directly")
-        return vol
+        raise NotImplemented("BaseOption doesnt have a price")
 
     def get_d1(self, vol) -> float:
         if vol not in self.cache_d1:
@@ -113,5 +113,4 @@ class BaseOption:
         if found_options := list(filter(lambda x: x == self, listed_options)):  # Could use the name also
             self.price = found_options[0].price
             return self.price
-        else:  # No listed option found, lets approximate price with close listed options
-            pass
+        return 0

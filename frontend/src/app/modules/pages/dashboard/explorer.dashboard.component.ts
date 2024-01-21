@@ -5,6 +5,8 @@ import { Observable } from 'rxjs';
 import { Option } from 'src/models/option';
 import { OptionsService } from 'src/services/options.service';
 import { TitleCasePipe } from '@angular/common';
+import * as moment from 'moment';
+import { SurfaceRequest } from 'src/models/surface';
 var Plotly = require("plotly.js-dist-min")
 
 class OptionParameters {
@@ -12,6 +14,8 @@ class OptionParameters {
     optionType: string = "Call"
     field: string = "price"
     range: number = 5
+    refresh: boolean = false
+    maturity: number = 1
 }
 
 @Component({
@@ -59,6 +63,9 @@ export class ExplorerDashboardComponent implements OnInit {
     fields = ["price", "delta", "gamma", "vega", "theta", "rho", "implied_vol"]
     ranges = [5, 10, 15, 25]
     defaultOptionType = "Call"
+    maturities = [1, 2, 3, 4, 5, 6, 9, 12]
+    
+    maturity = 1
 
     parameters = new OptionParameters()
 
@@ -101,9 +108,24 @@ export class ExplorerDashboardComponent implements OnInit {
         this.computeSurface()
     }
 
+    onMaxMaturityChange(event: any){
+        this.parameters.maturity= event.target.value
+        this.computeSurface()
+    }
+
+    onRefreshChange(event:any){
+        this.parameters.refresh = !this.parameters.refresh
+    }
+
+    test(){
+        console.log("ALEX")
+    }
+
+
     loadOptions() {
         console.log(this.parameters)
-        this.rowData$ = this.optionsService.getOptions(this.parameters.ticker)
+        const maxMat = moment().add(this.parameters.maturity, 'M').format('YYYY-MM-DD')
+        this.rowData$ = this.optionsService.getOptions(this.parameters.ticker, this.parameters.refresh, maxMat)
         this.optionsService.getSpot(this.parameters.ticker).subscribe({
             next: d => {
                 this.spot = d
@@ -126,7 +148,8 @@ export class ExplorerDashboardComponent implements OnInit {
 
 
     computeSurface() {
-        this.optionsService.getSurface(this.parameters.ticker, this.parameters.optionType, this.parameters.field, this.parameters.range).subscribe({
+        const maxMat = moment().add(this.parameters.maturity, 'M').format('YYYY-MM-DD')
+this.optionsService.postSurface(new SurfaceRequest(this.parameters.ticker, this.parameters.optionType, this.parameters.field, this.parameters.range, maxMat)).subscribe({
 
             next: d => {
                 const zAxis = this.titlecasePipe.transform(this.parameters.field.replace("_", " "))

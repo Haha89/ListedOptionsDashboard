@@ -25,8 +25,7 @@ def price_call(option: Call, periods=2):
     def price_step(step, spot):
         if step == periods:
             return max(0, spot - option.strike)
-        else:
-            return discount_factor * (p * price_step(step + 1, spot * u) + (1 - p) * price_step(step + 1, spot * d))
+        return discount_factor * (p * price_step(step + 1, spot * u) + (1 - p) * price_step(step + 1, spot * d))
 
     return price_step(0, env.spots[option.underlying])
 
