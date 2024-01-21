@@ -16,7 +16,7 @@
                 <div class="col-auto d-flex">
                   <p-button [hideLabel]="true" [icon]="'arrow-right'" type='button' class="mt-auto" (click)="loadOptions()">Some label</p-button>
                 </div>
-  
+
               </div>
 
               <p-segmented-control [value]="parameters.optionType" aria-label="Choose an option" id="opt2ionType"
@@ -28,14 +28,14 @@
                   <input [type]="'checkbox'" [name]="'refresh'"  [value]="parameters.refresh" (change)="onRefreshChange($event)"/>
                 </p-checkbox-wrapper>
               </div>
-        
+
 
               <p-select-wrapper [label]="'Field:'" [hideLabel]="false">
                 <select id="field" [value]="parameters.field" (change)="onFieldChange($event)">
                   <option *ngFor="let f of fields" [value]="f">{{f.replace("_", " ") | titlecase}}</option>
                 </select>
               </p-select-wrapper>
-              
+
               <div class="row g-1 pb-2">
                 <div class="col">
                   <p-select-wrapper [label]="'Range (around spot):'" [hideLabel]="false">
