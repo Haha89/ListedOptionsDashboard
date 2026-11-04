@@ -7,7 +7,7 @@ Implied volatility is computed from market prices (bid/ask mid, or last trade wh
 # Getting Started
 
 ## Prerequisites
-- [uv](https://docs.astral.sh/uv/), or Docker
+- [uv](https://docs.astral.sh/uv/) (it installs Python 3.15, pinned in `backend/.python-version`), or Docker
 
 ## Running the app locally
 ```

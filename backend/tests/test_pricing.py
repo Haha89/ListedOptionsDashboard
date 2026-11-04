@@ -7,7 +7,7 @@ import pytest
 
 from src.option_vol.binomial.pricer import price_call
 from src.option_vol.models import Call, Environment, Put
-from src.option_vol.models.base_option import newYorkTz
+from src.option_vol.models.base_option import NEW_YORK
 
 SPOT, RATE = 100.0, 0.05
 
@@ -21,7 +21,7 @@ def market(monkeypatch):
 
 def make(cls, strike=100.0, days=365, price=None, vol=None):
     """Option on TEST expiring in `days` calendar days (365 days = 1 year), optionally with a set implied vol"""
-    option = cls(strike, datetime.now(newYorkTz).date() + timedelta(days=days), "TEST", price)
+    option = cls(strike, datetime.now(NEW_YORK).date() + timedelta(days=days), "TEST", price)
     option.implied_vol = vol
     return option
 

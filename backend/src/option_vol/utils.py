@@ -52,5 +52,5 @@ def is_float(element: any) -> bool:
     try:
         float(element)
         return True
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False

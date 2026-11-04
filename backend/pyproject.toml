@@ -1,15 +1,16 @@
 [project]
 name = "listed-options-backend"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.15"
 dependencies = [
     "dash>=4.5.0",
+    "dash-ag-grid>=35.3.0",
     "numpy>=2.4.6",
     "pandas>=3.1.0",
     "prettytable>=3.18.0",
     "python-dateutil>=4.0.0",
-    "pytz>=2026.6",
     "scipy>=1.17.1",
+    "tzdata>=2026.6",
     "yfinance>=1.8.0",
 ]
 
@@ -21,6 +22,7 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+addopts = "-p no:dash"  # dash ships a pytest plugin for browser tests we don't use; it warns on pytest 9
 
 [tool.ruff]
 line-length = 120

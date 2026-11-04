@@ -1,12 +1,11 @@
 from datetime import date, datetime
-
-import pytz
+from zoneinfo import ZoneInfo
 
 from src.option_vol import black_scholes as bs
 from src.option_vol.models import Environment
 from src.option_vol.utils import display_options
 
-newYorkTz = pytz.timezone("America/New_York")
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 class BaseOption:
@@ -23,7 +22,7 @@ class BaseOption:
 
         self.name = self.get_name()
         self.implied_vol = None
-        self.T = (self.maturity - datetime.now(newYorkTz).date()).days / 365  # calendar days -> years
+        self.T = (self.maturity - datetime.now(NEW_YORK).date()).days / 365  # calendar days -> years
         self.r = Environment().get_risk_free_rate()
         self.spot = Environment().get_spot(self.underlying)
         self.div_yield = 0  # Environment().get_div_yield(self.underlying)

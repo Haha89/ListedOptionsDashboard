@@ -5,10 +5,11 @@ import math
 import time
 from datetime import date
 
+import dash_ag_grid as dag
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, ctx, dash_table, dcc, html
+from dash import Dash, Input, Output, State, ctx, dcc, html
 from dateutil.relativedelta import relativedelta
 from plotly.subplots import make_subplots
 
@@ -342,14 +343,18 @@ app.layout = html.Div(
                     html.Label("Maturity", htmlFor="maturity"),
                     dcc.Slider(0, 0, 1, value=0, id="maturity", marks={}, included=False),
                 ),
-                dash_table.DataTable(
-                    id="table",
-                    columns=[{"name": to_title(c), "id": c} for c in COLUMNS],
-                    sort_action="native",
-                    filter_action="native",
-                    page_size=20,
-                    style_table={"overflowX": "auto"},
-                    style_cell={"fontFamily": "inherit", "padding": "4px 8px"},
+                card(
+                    dag.AgGrid(
+                        id="table",
+                        rowData=[],
+                        columnDefs=[
+                            {"field": c, "headerName": to_title(c)}
+                            | ({} if c in ("name", "maturity") else {"filter": "agNumberColumnFilter"})
+                            for c in COLUMNS
+                        ],
+                        defaultColDef={"sortable": True, "filter": True, "floatingFilter": True, "flex": 1},
+                        dashGridOptions={"pagination": True, "paginationPageSize": 20, "domLayout": "autoHeight"},
+                    )
                 ),
             ],
         ),
@@ -359,7 +364,7 @@ app.layout = html.Div(
 
 @app.callback(
     Output("surface", "figure"),
-    Output("table", "data"),
+    Output("table", "rowData"),
     Output("status", "children"),
     Output("loaded", "data"),
     Output("maturity", "max"),
