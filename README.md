@@ -1,41 +1,48 @@
 # ListedOptionDashboard
-A dashboard built with Angular, Plotly and AgGrid to visualize the Greek surface of listed European options.
+A [Dash](https://dash.plotly.com/) dashboard to visualize the implied volatility and Greek surfaces of listed options.
 
-This repo contains a library to price european calls and puts using Black-Scholes models. It retrieves listed options of any underlying from Yahoo Finance using [yfinance](https://github.com/ranaroussi/yfinance).
-Implied volatility is computed using market prices and greeks are then calculated.
-
-Finally an interactive dashboard using plotly can run on your computer or on a docker container.
-
-![image](https://github.com/Haha89/ListedOptionsDashboard/assets/45851831/2f778202-3cf7-4181-89ff-f55bc3f5f3f6)
+This repo contains a library to price European calls and puts with the Black-Scholes model. It retrieves listed options of any underlying from Yahoo Finance using [yfinance](https://github.com/ranaroussi/yfinance).
+Implied volatility is computed from market prices (bid/ask mid, or last trade when there is no two-sided quote) and the greeks are computed at that vol.
 
 # Getting Started
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes.
 
 ## Prerequisites
-- Docker
+- [uv](https://docs.astral.sh/uv/), or Docker
 
 ## Running the app locally
-1. Clone the repository
-```git clone https://github.com/Haha89/OptionPricing```
+```
+cd backend
+uv sync
+uv run python app.py
+```
+The dashboard runs on http://127.0.0.1:8050. Set `DASH_DEBUG=1` for hot reload and Dash dev tools (local use only).
 
-2. Go to the project folder
-   ```cd OptionPricing```
+With Docker:
+```
+docker build -t options-dashboard backend
+docker run -p 8050:8050 options-dashboard
+```
 
-3. Build the docker container
-```docker-compose up -d --build```
+## Tests
+```
+cd backend
+uv run pytest
+```
 
-The web app will be running on http://localhost:4200
+## Behind an HTTPS-scanning antivirus or proxy
+If downloads fail with a certificate error, point curl (used by yfinance) at a CA bundle that includes your system's
+root certificates: `CURL_CA_BUNDLE=<path to bundle.pem>`. For uv, set `UV_SYSTEM_CERTS=1`.
 
-# Data
-The Greek surface data is pulled from a data source of your choice, you can use an API or read it from a CSV file. You will need to modify the code accordingly to retrieve the data and pass it to the Plotly Scatter3d plot.
+# Conventions
+Time to maturity in calendar years (days / 365), vega per 1.00 of vol, theta per calendar day, rho per 1% move in rate.
 
 # Built With
-- Angular - Main framework used to build the dashboard
-- Plotly - Used to create the Greek surface visualization
-- Fastapi: Python framework to build REST api
+- Dash and Plotly: dashboard and surface plots
+- NumPy and SciPy: vectorised Black-Scholes pricing and implied vol
+- yfinance: listed option chains and spot prices
 
 # License
 This project is licensed under the MIT License - see the LICENSE.md file for details
 
 # Next steps
-For now the pricing model is very simple. Adding jump diffusion, a dividend yield will be interesting. Adding other numerical techniques to price options like Monte-Carlo is planned.
+See [ROADMAP.md](ROADMAP.md).

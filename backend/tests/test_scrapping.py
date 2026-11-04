@@ -32,6 +32,7 @@ class FakeTicker:
 def fake_yahoo(monkeypatch):
     monkeypatch.setattr(scrapping, "Ticker", FakeTicker)
     monkeypatch.setitem(Environment.spots, "TEST", 100.0)
+    monkeypatch.setattr(Environment, "risk_free_rate", 0.05)
 
 
 def test_prices_use_mid_then_last_trade_and_skip_empty_quotes():

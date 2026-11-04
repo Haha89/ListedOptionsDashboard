@@ -6,7 +6,7 @@ from prettytable import PrettyTable
 OPTION_ATTRIBUTES = ["name", "type", "underlying", "strike", "maturity", "price", "implied_vol",
                      "delta", "gamma", "theta", "vega", "rho"]
 
-YAHOO_MAPPING = {"SPX": "^GSPC"}
+YAHOO_MAPPING = {"SPX": "^SPX", "NDX": "^NDX"}  # indices: Yahoo lists their options under ^SPX, ^NDX
 
 
 def display_options(elements: List):

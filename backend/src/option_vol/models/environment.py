@@ -16,8 +16,16 @@ class Singleton:
 
 class Environment(Singleton):
     spots, div_yield, vol = {}, {}, {}
-    risk_free_rate = 0
+    risk_free_rate = None
     listed_options = {}
+
+    def get_risk_free_rate(self) -> float:
+        """ 13-week US T-bill yield (^IRX, quoted in percent) as a continuous rate """
+        # shortcut: fetched once per process and one rate for all maturities; the implied dividend yield per expiry
+        # (see app.implied_yield) absorbs the gap on the forward. Use a Treasury curve if discounting matters.
+        if Environment.risk_free_rate is None:
+            Environment.risk_free_rate = float(Ticker("^IRX").fast_info["lastPrice"]) / 100
+        return Environment.risk_free_rate
 
     def get_spot(self, underlying):
         return self._query(underlying, "spots")
