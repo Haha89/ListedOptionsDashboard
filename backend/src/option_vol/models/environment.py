@@ -62,7 +62,7 @@ class Environment(Singleton):
 
     @staticmethod
     def _get_spot(underlying):
-        return download(tickers=YAHOO_MAPPING.get(underlying, underlying), period='1d', interval='1d')["Adj Close"].iloc[0]
+        return float(Ticker(YAHOO_MAPPING.get(underlying, underlying)).fast_info["lastPrice"])
 
     def get_historical_spots(self, underlyings):
         return download(tickers=[YAHOO_MAPPING.get(u, u) for u in underlyings], period='1y', interval='1d')

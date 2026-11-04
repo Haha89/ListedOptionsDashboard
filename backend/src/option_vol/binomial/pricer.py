@@ -1,36 +1,28 @@
 import math
 from datetime import date
 
-from src.option_vol.models import Call, Environment
+import numpy as np
 
-env = Environment()
-env.risk_free_rate = 0.0353
-env.div_yield = {"SPX": 0.0163}
-env.vol = {"SPX": 0.1961}
+from src.option_vol.models import Call
 
 
-def price_call(option: Call, periods=2):
-    r = env.risk_free_rate
-    vol = env.vol[option.underlying]
-    div_yield = env.div_yield[option.underlying]
-
+def price_call(option: Call, vol: float, periods=2, div_yield=0.0) -> float:
+    """ Price a European call on a Cox-Ross-Rubinstein tree, using the option's spot, rate and maturity """
+    r = option.r
     dt = option.T / periods
     u = math.exp(vol * math.sqrt(dt))
     d = 1 / u
+    p = (math.exp((r - div_yield) * dt) - d) / (u - d)  # risk-neutral up probability
+    discount_factor = math.exp(-r * dt)
 
-    a = math.exp((r - div_yield) * dt)
-    p = (a - d) / (u - d)
-    discount_factor = math.exp(-(r - div_yield) * math.sqrt(dt))
-
-    def price_step(step, spot):
-        if step == periods:
-            return max(0, spot - option.strike)
-        return discount_factor * (p * price_step(step + 1, spot * u) + (1 - p) * price_step(step + 1, spot * d))
-
-    return price_step(0, env.spots[option.underlying])
+    # terminal spots from the top node (all ups) to the bottom one (all downs), then roll back one step at a time
+    spots = option.spot * u ** np.arange(periods, -periods - 1, -2)
+    values = np.maximum(spots - option.strike, 0)
+    for _ in range(periods):
+        values = discount_factor * (p * values[:-1] + (1 - p) * values[1:])
+    return float(values[0])
 
 
 if __name__ == "__main__":
-    print(env.get_spot("SPX"))
-    call = Call(3800, date(2024, 3, 15), "SPX")
-    print(price_call(call, periods=3))
+    call = Call(3800, date(2027, 3, 19), "SPX")
+    print(price_call(call, vol=0.1961, periods=500, div_yield=0.0163))

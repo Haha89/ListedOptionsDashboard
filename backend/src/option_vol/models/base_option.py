@@ -21,7 +21,7 @@ class BaseOption:
 
         self.name = self.get_name()
         self.implied_vol = None
-        self.T = (self.maturity - datetime.now(newYorkTz).date()).days / 252
+        self.T = (self.maturity - datetime.now(newYorkTz).date()).days / 365  # calendar days -> years
         self.r = Environment().risk_free_rate
         self.spot = Environment().get_spot(self.underlying)
         self.div_yield = 0 #Environment().get_div_yield(self.underlying)
@@ -52,13 +52,12 @@ class BaseOption:
     def price_with_black_scholes(self, vol: float) -> float:
         """ Placeholder, """
         print("This function should not be called directly")
-        raise NotImplemented("BaseOption doesnt have a price")
+        raise NotImplementedError("BaseOption doesnt have a price")
 
     def get_d1(self, vol) -> float:
         if vol not in self.cache_d1:
-            if vol == 0:
-                print("null vol")
-            self.cache_d1[vol] = (1 / vol * self.sqrt_t) * (log(self.spot / self.strike) + self.T * (self.r - self.div_yield + .5 * vol ** 2))
+            self.cache_d1[vol] = (log(self.spot / self.strike) + self.T * (self.r - self.div_yield + .5 * vol ** 2)) \
+                                 / (vol * self.sqrt_t)
         return self.cache_d1[vol]
 
     def get_d2(self, vol) -> float:
@@ -84,20 +83,25 @@ class BaseOption:
             self.implied_vol = self.solve_implied_vol(self.price)
         return self.implied_vol
 
-    def solve_implied_vol(self, target_price, max_iter=100, tol=1e-5, initial_vol=0.2) -> float:
-        """  Use the Newton-Raphson method to find the implied volatility that would produce an option price closest
-        to the target price."""
-        vol = initial_vol
-        for i in range(max_iter):
-            price = self.price_with_black_scholes(vol=vol)
-            vega = self.get_vega(vol=vol) or 1e-5
-            vol_prev = vol
-            vol -= (price - target_price) / vega
-            change = abs(vol - vol_prev)
-            if change < tol:
-                return vol
-            if change > 2 * tol and i > 1:
+    def solve_implied_vol(self, target_price, max_iter=100, tol=1e-8, low=1e-4, high=5.0) -> float:
+        """ Find the volatility whose Black-Scholes price equals target_price, or nan if no vol in [low, high] does.
+        Newton-Raphson steps, falling back to bisection when a step leaves the bracket: the price is increasing
+        in vol, so the bracket always holds the root. """
+        if not self.price_with_black_scholes(low) <= target_price <= self.price_with_black_scholes(high):
+            return float("nan")
+        vol = 0.2
+        for _ in range(max_iter):
+            diff = self.price_with_black_scholes(vol) - target_price
+            if abs(diff) < tol:
                 break
+            if diff > 0:
+                high = vol
+            else:
+                low = vol
+            vega = self.get_vega(vol=vol)
+            vol = vol - diff / vega if vega > 0 else low
+            if not low < vol < high:
+                vol = (low + high) / 2
         return vol
 
     def set_greeks(self):

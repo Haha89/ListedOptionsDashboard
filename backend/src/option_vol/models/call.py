@@ -24,7 +24,7 @@ class Call(BaseOption):
         a = (self.spot * norm.pdf(d1) * self.implied_vol * self.exp_div) / (2 * self.sqrt_t)
         b = self.r * self.strike * self.exp_rt * norm.cdf(d2)
         c = self.div_yield * self.spot * self.exp_div * norm.cdf(d1)
-        return (-a - b + c) / 252
+        return (-a - b + c) / 365  # per calendar day
 
     def get_rho(self) -> float:
         return .01 * self.strike * self.T * self.exp_rt * norm.cdf(self.get_d2(self.implied_vol))

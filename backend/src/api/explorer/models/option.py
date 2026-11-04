@@ -2,7 +2,7 @@
 
 from datetime import date
 
-import numpy as np
+import math
 import sqlalchemy as sa
 from fastapi_utils.api_model import APIModel
 from pydantic import validator
@@ -20,7 +20,7 @@ class OptionORM(Base):
     name = sa.Column(sa.String, primary_key=True, nullable=False)
     type = sa.Column(sa.String, nullable=False)
     underlying = sa.Column(sa.String, nullable=False)
-    strike = sa.Column(sa.Integer, nullable=False)
+    strike = sa.Column(sa.Float, nullable=False)
     maturity = sa.Column(sa.Date, nullable=False)
     price = sa.Column(sa.Float)
     delta = sa.Column(sa.Float)
@@ -68,7 +68,7 @@ class Option(APIModel):
     name: str
     type: str
     underlying: str
-    strike: int
+    strike: float
     maturity: date
     price: float = 0
     delta: float = 0
@@ -80,8 +80,8 @@ class Option(APIModel):
 
     @validator('delta', 'gamma', 'vega', 'theta', 'rho', 'implied_vol', pre=True)
     def default(cls, v: float) -> float:
-        """ Replace np.nan and inf to 0 """
-        return 0. if v in (np.inf, np.nan) else v
+        """ Replace None, nan and +-inf with 0 """
+        return 0. if v is None or not math.isfinite(v) else v
 
     @validator('delta', 'gamma', 'vega', 'theta', 'rho', 'implied_vol')
     def round(cls, v):
