@@ -1,7 +1,7 @@
 # ListedOptionDashboard
 A dashboard built with Angular, Plotly and AgGrid to visualize the Greek surface of listed European options.
 
-This repo contains a library to price european calls and puts using Black-Scholes models. It can retrieve listed options of any underlying using [MarketWatch](https://www.marketwatch.com/).
+This repo contains a library to price european calls and puts using Black-Scholes models. It retrieves listed options of any underlying from Yahoo Finance using [yfinance](https://github.com/ranaroussi/yfinance).
 Implied volatility is computed using market prices and greeks are then calculated.
 
 Finally an interactive dashboard using plotly can run on your computer or on a docker container.

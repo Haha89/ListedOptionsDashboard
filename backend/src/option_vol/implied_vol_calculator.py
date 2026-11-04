@@ -10,7 +10,7 @@ class ImpliedVolCalculator:
     def get_priced_options(self, underlying, depth=0.15) -> List[BaseOption]:
         """ Retrieves listed options for the underlying, then computes implied vol and greeks """
         spot = self.env.get_spot(underlying)
-        print("Retrieving listed options from MarketWatch")
+        print("Retrieving listed options from Yahoo Finance")
         options = self.env.get_listed_options(underlying)
         print(f"{len(options)} options found")
         options = [o for o in options if (1 - depth * 0.01) <= o.strike / spot <= (1 + depth * 0.01)]
