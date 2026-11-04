@@ -50,6 +50,5 @@ bid/ask bars and the fitted curve. A fit residuals table points to quotes that a
 - Dividends: discrete dividends instead of a continuous yield, for names that pay quarterly.
 
 ## 6. Engineering
-- CI: run `uv run pytest` and a linter (ruff) instead of pylint over every file.
 - Rate curve (Treasury) instead of a single 13-week T-bill rate.
 - Shared cache (flask-caching / Redis) if the dashboard is served to several users.

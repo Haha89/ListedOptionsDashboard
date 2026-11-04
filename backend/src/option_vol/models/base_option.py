@@ -10,7 +10,8 @@ newYorkTz = pytz.timezone("America/New_York")
 
 
 class BaseOption:
-    """ A listed European option; Call and Put only set is_call. The math lives in black_scholes. """
+    """A listed European option; Call and Put only set is_call. The math lives in black_scholes."""
+
     is_call: bool
 
     def __init__(self, strike: float, maturity: date, underlying: str, price=None):
@@ -32,8 +33,12 @@ class BaseOption:
 
     def __eq__(self, other):
         # Two options are equal if same type, strike, maturity and underlying
-        return self.type == other.type and self.strike == other.strike and \
-            self.maturity == other.maturity and self.underlying == other.underlying
+        return (
+            self.type == other.type
+            and self.strike == other.strike
+            and self.maturity == other.maturity
+            and self.underlying == other.underlying
+        )
 
     def __str__(self):
         return self.get_name()
@@ -42,8 +47,8 @@ class BaseOption:
         return str(display_options([self]))
 
     def get_name(self):
-        und, mat, typ = self.underlying, self.maturity.strftime('%y%m%d'), self.type[0]
-        return f"{und}{mat}{typ}{self.strike:09.3f}".replace('.', '')
+        und, mat, typ = self.underlying, self.maturity.strftime("%y%m%d"), self.type[0]
+        return f"{und}{mat}{typ}{self.strike:09.3f}".replace(".", "")
 
     def _market(self):
         return dict(S=self.spot, K=self.strike, T=self.T, r=self.r, is_call=self.is_call, q=self.div_yield)
@@ -60,11 +65,11 @@ class BaseOption:
         return self.implied_vol
 
     def solve_implied_vol(self, target_price) -> float:
-        """ Vol whose Black-Scholes price equals target_price, nan if none does """
+        """Vol whose Black-Scholes price equals target_price, nan if none does"""
         return float(bs.implied_vol(target_price, **self._market()))
 
     def set_greeks(self):
-        """ Store delta, gamma, vega, theta and rho at the implied vol as attributes """
+        """Store delta, gamma, vega, theta and rho at the implied vol as attributes"""
         for greek, value in bs.greeks(vol=self.implied_vol, **self._market()).items():
             setattr(self, greek, float(value))
 

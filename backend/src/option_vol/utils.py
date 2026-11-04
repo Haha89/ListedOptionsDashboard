@@ -1,16 +1,26 @@
-from typing import List
-
 import pandas as pd
 from prettytable import PrettyTable
 
-OPTION_ATTRIBUTES = ["name", "type", "underlying", "strike", "maturity", "price", "implied_vol",
-                     "delta", "gamma", "theta", "vega", "rho"]
+OPTION_ATTRIBUTES = [
+    "name",
+    "type",
+    "underlying",
+    "strike",
+    "maturity",
+    "price",
+    "implied_vol",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+]
 
 YAHOO_MAPPING = {"SPX": "^SPX", "NDX": "^NDX"}  # indices: Yahoo lists their options under ^SPX, ^NDX
 
 
-def display_options(elements: List):
-    """ Format a list of objects as a table in the console. Headers are based on elements content class """
+def display_options(elements: list):
+    """Format a list of objects as a table in the console. Headers are based on elements content class"""
     my_table = PrettyTable()
     attributes = _get_attributes(elements[0])
     my_table.field_names = attributes
@@ -18,18 +28,19 @@ def display_options(elements: List):
     return my_table
 
 
-def list_to_df(elements: List, decimals=4) -> pd.DataFrame:
+def list_to_df(elements: list, decimals=4) -> pd.DataFrame:
     return pd.DataFrame([e.__dict__ for e in elements]).round(decimals)
 
 
 def _get_attributes(element):
-    from src.option_vol.models import Put, Call
+    from src.option_vol.models import Call, Put
+
     if isinstance(element, (Call, Put)):
         return OPTION_ATTRIBUTES
     raise ValueError("Object doesnt have any mapping")
 
 
-def _list_attributes(obj, attributes) -> List:
+def _list_attributes(obj, attributes) -> list:
     return [round(e, 4) if is_float(e := obj.__getattribute__(o)) else e for o in attributes]
 
 

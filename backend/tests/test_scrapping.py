@@ -1,4 +1,5 @@
-""" Option chain parsing from Yahoo, with yfinance replaced by a fake """
+"""Option chain parsing from Yahoo, with yfinance replaced by a fake"""
+
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -19,12 +20,14 @@ class FakeTicker:
         assert symbol == "TEST"
 
     def option_chain(self, expiry):
-        quotes = pd.DataFrame({  # two-sided quote, no quote but a last trade, nothing at all
-            "strike": [90.0, 100.0, 110.0],
-            "bid": [10.0, 0.0, float("nan")],
-            "ask": [12.0, 0.0, float("nan")],
-            "lastPrice": [11.5, 3.0, 0.0],
-        })
+        quotes = pd.DataFrame(
+            {  # two-sided quote, no quote but a last trade, nothing at all
+                "strike": [90.0, 100.0, 110.0],
+                "bid": [10.0, 0.0, float("nan")],
+                "ask": [12.0, 0.0, float("nan")],
+                "lastPrice": [11.5, 3.0, 0.0],
+            }
+        )
         return SimpleNamespace(calls=quotes, puts=quotes)
 
 
@@ -38,7 +41,11 @@ def fake_yahoo(monkeypatch):
 def test_prices_use_mid_then_last_trade_and_skip_empty_quotes():
     options = scrapping.Scrapping.parse_underlying_until("TEST", EXPIRIES[1])
     assert [(type(o), o.strike, o.price) for o in options] == [
-        (Call, 90.0, 11.0), (Call, 100.0, 3.0), (Put, 90.0, 11.0), (Put, 100.0, 3.0)]
+        (Call, 90.0, 11.0),
+        (Call, 100.0, 3.0),
+        (Put, 90.0, 11.0),
+        (Put, 100.0, 3.0),
+    ]
 
 
 def test_expiries_after_today_up_to_max_maturity():

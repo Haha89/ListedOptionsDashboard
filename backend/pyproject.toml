@@ -16,7 +16,14 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
+    "ruff>=0.17.3",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["C408"]  # dict(l=..., r=...) is the usual way to write plotly layouts

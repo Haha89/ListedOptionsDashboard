@@ -7,7 +7,7 @@ from src.option_vol.models import Call
 
 
 def price_call(option: Call, vol: float, periods=2, div_yield=0.0) -> float:
-    """ Price a European call on a Cox-Ross-Rubinstein tree, using the option's spot, rate and maturity """
+    """Price a European call on a Cox-Ross-Rubinstein tree, using the option's spot, rate and maturity"""
     r = option.r
     dt = option.T / periods
     u = math.exp(vol * math.sqrt(dt))

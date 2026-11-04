@@ -1,4 +1,5 @@
-""" Dashboard data path: pricing a chain, filtering it and building the surface, with Yahoo replaced by a fake """
+"""Dashboard data path: pricing a chain, filtering it and building the surface, with Yahoo replaced by a fake"""
+
 import numpy as np
 import pytest
 
@@ -18,7 +19,8 @@ DIV_YIELD = 0.0  # tests swap it to check the implied yield
 
 @pytest.fixture(autouse=True)
 def fake_chain(monkeypatch):
-    """ Calls and puts at strikes 50..150 and 3 expiries, priced at vol_of(strike) """
+    """Calls and puts at strikes 50..150 and 3 expiries, priced at vol_of(strike)"""
+
     def chain(underlying, expiry_date):
         monkeypatch.setitem(Environment.spots, "TEST", 100.0)  # load_options dropped it to force a fresh spot
         options = [make(cls, k, days) for cls in (Call, Put) for k in range(50, 151, 10) for days in (30, 90, 180)]
@@ -26,6 +28,7 @@ def fake_chain(monkeypatch):
             o.div_yield = globals()["DIV_YIELD"]
             o.price = o.price_with_black_scholes(globals()["vol_of"](o.strike))
         return options
+
     monkeypatch.setattr(app.Scrapping, "parse_underlying_until", staticmethod(chain))
     monkeypatch.setattr(app, "_cache", {})
 
@@ -44,8 +47,9 @@ def test_load_options_recovers_vol_and_greeks():
 def test_one_snapshot_per_ticker(monkeypatch):
     fetches = []
     fetch = app.Scrapping.parse_underlying_until
-    monkeypatch.setattr(app.Scrapping, "parse_underlying_until",
-                        staticmethod(lambda u, e: fetches.append(e) or fetch(u, e)))
+    monkeypatch.setattr(
+        app.Scrapping, "parse_underlying_until", staticmethod(lambda u, e: fetches.append(e) or fetch(u, e))
+    )
     six_months = app.load_options("TEST", 6)
     one_month = app.load_options("TEST", 1)  # filtered from the same snapshot
     assert len(fetches) == 1 and one_month.maturity.nunique() == 1 and len(six_months) == 66
@@ -64,8 +68,17 @@ def test_select_and_surface():
 
 def test_by_delta_flat_vol():
     grid = app.by_delta(app.load_options("TEST", 6))
-    assert list(grid.index) == ["5Δ put", "10Δ put", "25Δ put", "40Δ put", "ATM (fwd)", "40Δ call", "25Δ call",
-                                 "10Δ call", "5Δ call"]
+    assert list(grid.index) == [
+        "5Δ put",
+        "10Δ put",
+        "25Δ put",
+        "40Δ put",
+        "ATM (fwd)",
+        "40Δ call",
+        "25Δ call",
+        "10Δ call",
+        "5Δ call",
+    ]
     assert grid.shape == (9, 3) and np.allclose(grid, VOL)
 
 

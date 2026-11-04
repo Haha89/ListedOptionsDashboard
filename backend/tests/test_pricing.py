@@ -1,4 +1,5 @@
-""" Black-Scholes, implied vol and binomial checks against textbook values and no-arbitrage identities """
+"""Black-Scholes, implied vol and binomial checks against textbook values and no-arbitrage identities"""
+
 import math
 from datetime import datetime, timedelta
 
@@ -13,13 +14,13 @@ SPOT, RATE = 100.0, 0.05
 
 @pytest.fixture(autouse=True)
 def market(monkeypatch):
-    """ Fake market so options never hit Yahoo: spot 100 for 'TEST', 5% rate """
+    """Fake market so options never hit Yahoo: spot 100 for 'TEST', 5% rate"""
     monkeypatch.setitem(Environment.spots, "TEST", SPOT)
     monkeypatch.setattr(Environment, "risk_free_rate", RATE)
 
 
 def make(cls, strike=100.0, days=365, price=None, vol=None):
-    """ Option on TEST expiring in `days` calendar days (365 days = 1 year), optionally with a set implied vol """
+    """Option on TEST expiring in `days` calendar days (365 days = 1 year), optionally with a set implied vol"""
     option = cls(strike, datetime.now(newYorkTz).date() + timedelta(days=days), "TEST", price)
     option.implied_vol = vol
     return option
@@ -57,20 +58,26 @@ def test_implied_vol_round_trip(cls, strike, vol, days):
         assert solved == pytest.approx(vol, abs=1e-5)
 
 
-@pytest.mark.parametrize("cls, strike, price", [
-    (Call, 80, 15.0),   # below the ~23.9 a zero-vol call is worth
-    (Put, 120, 10.0),   # below the ~14.1 a zero-vol put is worth
-    (Call, 100, 150.0), # above the spot: no vol can produce it
-])
+@pytest.mark.parametrize(
+    "cls, strike, price",
+    [
+        (Call, 80, 15.0),  # below the ~23.9 a zero-vol call is worth
+        (Put, 120, 10.0),  # below the ~14.1 a zero-vol put is worth
+        (Call, 100, 150.0),  # above the spot: no vol can produce it
+    ],
+)
 def test_implied_vol_is_nan_when_no_vol_matches(cls, strike, price):
     assert math.isnan(make(cls, strike, price=price).set_implied_volatility())
 
 
 # Same textbook option: theta per calendar day (annual / 365), rho per 1% rate move, vega per 1.00 of vol
-@pytest.mark.parametrize("cls, delta, theta, rho", [
-    (Call, 0.636831, -6.414028 / 365, 0.532325),
-    (Put, -0.363169, -1.657880 / 365, -0.418905),
-])
+@pytest.mark.parametrize(
+    "cls, delta, theta, rho",
+    [
+        (Call, 0.636831, -6.414028 / 365, 0.532325),
+        (Put, -0.363169, -1.657880 / 365, -0.418905),
+    ],
+)
 def test_greeks_textbook_values(cls, delta, theta, rho):
     option = make(cls, vol=0.2)
     option.set_greeks()
@@ -92,8 +99,7 @@ def test_greeks_match_finite_differences(cls, monkeypatch):
         return make(cls, 110, 200).price_with_black_scholes(sigma)
 
     assert option.delta == pytest.approx((price_at(SPOT + h) - price_at(SPOT - h)) / (2 * h), abs=1e-6)
-    assert option.gamma == pytest.approx((price_at(SPOT + h) - 2 * price_at() + price_at(SPOT - h)) / h ** 2,
-                                         abs=1e-4)
+    assert option.gamma == pytest.approx((price_at(SPOT + h) - 2 * price_at() + price_at(SPOT - h)) / h**2, abs=1e-4)
     assert option.vega == pytest.approx((price_at(sigma=vol + h) - price_at(sigma=vol - h)) / (2 * h), rel=1e-5)
 
 
