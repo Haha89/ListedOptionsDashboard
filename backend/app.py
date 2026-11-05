@@ -15,8 +15,8 @@ from dateutil.relativedelta import relativedelta
 from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
 
+from src.option_vol import arbitrage, ssvi
 from src.option_vol import black_scholes as bs
-from src.option_vol import ssvi
 from src.option_vol.models import Environment
 from src.option_vol.scrapping import Scrapping
 from src.option_vol.utils import to_title
@@ -51,6 +51,7 @@ TICKERS = {  # symbols as Scrapping takes them; indices go through YAHOO_MAPPING
     "KO": "Coca-Cola",
 }
 CACHE_SECONDS = 15 * 60
+MULTIPLIER = 100  # underlying units per listed US option contract
 MARGIN = dict(l=50, r=10, b=40, t=50)
 INK, MUTED, RULE, PUT, CALL, ERROR = "#18212e", "#5d6878", "#dce1e7", "#2f6db5", "#c7870f", "#b3261e"
 FONT = "IBM Plex Sans, system-ui, sans-serif"
@@ -294,6 +295,23 @@ def smile(df: pd.DataFrame, expiry: date, spot: float) -> go.Figure:
             hovertemplate="Excluded: one-sided or spread over half the mid<br>Strike %{x:.2f}<br>"
             "Implied vol %{y:.2%}<br>Bid %{customdata[0]:.2f}, ask %{customdata[1]:.2f}<extra></extra>",
         )
+    found = arbitrage.scan(df[df.maturity == expiry])
+    if not found.empty:
+        strikes = found.assign(strike=found.strikes.str.split("/")).explode("strike").astype({"strike": float})
+        marked = (
+            chain.merge(strikes[["strike", "check"]], on="strike")
+            .groupby("strike", as_index=False)
+            .agg(implied_vol=("implied_vol", "first"), check=("check", lambda c: ", ".join(sorted(set(c)))))
+        )
+        fig.add_scatter(
+            x=marked.strike,
+            y=marked.implied_vol,
+            mode="markers",
+            name="In an arbitrage",
+            marker=dict(symbol="x", size=10, color=ERROR),
+            customdata=marked[["check"]],
+            hovertemplate="Strike %{x:.2f} is in a %{customdata[0]} arbitrage<extra></extra>",
+        )
     fig.add_vline(x=spot, line_dash="dot", line_color=MUTED, annotation_text=f"spot {spot:.2f}")
     atm = atm_vol(chain)
     if atm.notna().any():
@@ -392,24 +410,10 @@ def delta_heatmap(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def calendar_violations(smiles: pd.DataFrame) -> pd.DataFrame:
-    """Points of otm-style smiles with columns k = ln(K/F) and w = vol^2 T whose total variance is below an earlier
-    expiry's at the same k (interpolated between that expiry's strikes, never extrapolated): calendar arbitrage on mid
-    prices. Adds the shortfall w_earlier - w."""
-    slices = [s for _, s in smiles.groupby("maturity")]
-    found = [smiles.iloc[:0].assign(shortfall=0.0)]
-    for j, later in enumerate(slices):
-        floor = np.full(len(later), -np.inf)
-        for earlier in slices[:j]:  # k rises with strike within an expiry, as np.interp needs
-            floor = np.fmax(floor, np.interp(later.k, earlier.k, earlier.w, left=np.nan, right=np.nan))
-        below = later.w.to_numpy() < floor
-        found.append(later[below].assign(shortfall=(floor - later.w.to_numpy())[below]))
-    return pd.concat(found)
-
-
 def total_variance(df: pd.DataFrame, source: str) -> go.Figure:
     """Total variance vol^2 T against log-moneyness, one line per expiry, from market vols or the eSSVI fit. Without
-    calendar arbitrage a later expiry's line never dips below an earlier one's; red crosses mark market points that do."""
+    calendar arbitrage a later expiry's line never dips below an earlier one's; red crosses mark calendar arbitrage
+    on executable prices (a later expiry's ask below an earlier one's bid, in total variance)."""
     smiles = otm(df)
     if smiles.empty:
         return empty("No data")
@@ -433,16 +437,16 @@ def total_variance(df: pd.DataFrame, source: str) -> go.Figure:
             showlegend=False,
             hovertemplate=f"Expiry {maturity:%d %b %y}<br>k %{{x:.3f}}<br>σ²T %{{y:.4f}}<extra></extra>",
         )
-    bad = calendar_violations(smiles)
+    bad = arbitrage.calendars(df[(df.bid > 0) & (df.ask > 0)])
     fig.add_scatter(
         x=bad.k,
         y=bad.w,
         mode="markers",
-        marker=dict(symbol="x", size=8, color=ERROR),
-        name=f"{len(bad)} market points under an earlier expiry",
-        customdata=np.column_stack([bad.maturity.astype(str), bad.strike, bad.shortfall]),
-        hovertemplate="Expiry %{customdata[0]}, strike %{customdata[1]}<br>σ²T %{y:.4f}, "
-        "%{customdata[2]:.4f} under an earlier expiry<extra></extra>",
+        marker=dict(symbol="x", size=9, color=ERROR),
+        name=f"{len(bad)} calendar arbitrages at bid/ask",
+        customdata=np.column_stack([bad.maturity.astype(str), bad.strikes, bad.profit * MULTIPLIER]),
+        hovertemplate="Expiry %{customdata[0]}, strike %{customdata[1]}<br>σ²T at the ask %{y:.4f}, under an earlier "
+        "expiry's bid<br>$%{customdata[2]:.0f} per contract<extra></extra>",
     )
     source_label = "eSSVI fit" if fitted is not None else "market"
     fig.update_layout(
@@ -567,6 +571,28 @@ app.layout = html.Div(
                     ],
                 ),
                 card(
+                    html.H2(id="arbitrage-title", className="card-title"),
+                    dag.AgGrid(
+                        id="arbitrage",
+                        rowData=[],
+                        columnDefs=[
+                            {"field": "check", "headerName": "Check"},
+                            {"field": "maturity", "headerName": "Expiry"},
+                            {"field": "strikes", "headerName": "Strikes"},
+                            {
+                                "field": "dollars",
+                                "headerName": "Profit, $ per contract",
+                                "filter": "agNumberColumnFilter",
+                                "sort": "desc",
+                                "valueFormatter": {"function": "d3.format(',.2f')(params.value)"},
+                            },
+                            {"field": "trade", "headerName": "Trade", "flex": 3},
+                        ],
+                        defaultColDef={"sortable": True, "filter": True, "flex": 1},
+                        dashGridOptions={"pagination": True, "paginationPageSize": 10, "domLayout": "autoHeight"},
+                    ),
+                ),
+                card(
                     dag.AgGrid(
                         id="table",
                         rowData=[],
@@ -667,6 +693,21 @@ def update_total_variance(source, loaded):
     if not loaded:
         return empty("No data")
     return total_variance(in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"]), source)
+
+
+@app.callback(Output("arbitrage", "rowData"), Output("arbitrage-title", "children"), Input("loaded", "data"))
+def update_arbitrage(loaded):
+    if not loaded:
+        return [], "Static arbitrage"
+    found = arbitrage.scan(in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"]))
+    title = (
+        f"Static arbitrage at bid/ask: {len(found)} to check (free quotes can be stale; out-of-the-money and "
+        f"near-the-money strikes only)"
+        if len(found)
+        else "Static arbitrage at bid/ask: none (out-of-the-money and near-the-money strikes)"
+    )
+    rows = found.assign(dollars=found.profit * MULTIPLIER, maturity=found.maturity.astype(str))
+    return rows.drop(columns=["k", "w", "profit"], errors="ignore").to_dict("records"), title
 
 
 if __name__ == "__main__":

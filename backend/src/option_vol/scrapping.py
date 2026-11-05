@@ -10,6 +10,11 @@ from src.option_vol.utils import YAHOO_MAPPING
 AM_SETTLED = {"SPX", "NDX", "RUT"}  # roots of index monthlies settled at the open; SPXW, NDXP, RUTW settle at the close
 
 
+def settles_at_open(root: str, expiry: date) -> bool:
+    """Only the third-Friday monthlies of AM_SETTLED roots; Yahoo also lists e.g. SPX quarterlies (PM) under SPX"""
+    return root in AM_SETTLED and expiry.weekday() == 4 and 15 <= expiry.day <= 21
+
+
 class Scrapping:
     """Listed options from Yahoo Finance"""
 
@@ -40,7 +45,7 @@ class Scrapping:
                     price = (row.bid + row.ask) / 2 if two_sided else row.lastPrice
                     if not price > 0:  # also drops nan
                         continue
-                    expires_at = OPEN if root in AM_SETTLED else CLOSE
+                    expires_at = OPEN if settles_at_open(root, expiry) else CLOSE
                     option = cls(float(row.strike), expiry, underlying, float(price), expires_at)
                     if two_sided:
                         option.bid, option.ask = float(row.bid), float(row.ask)

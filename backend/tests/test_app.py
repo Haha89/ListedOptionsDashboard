@@ -160,20 +160,6 @@ def test_vol_view_takes_the_otm_side_whatever_the_quotes_in_the_money(monkeypatc
     assert set(view[view.strike == 90].type) == {"Put"}
 
 
-def with_k_w(smiles):
-    return smiles.assign(k=np.log(smiles.strike / smiles.forward), w=smiles.implied_vol**2 * smiles["T"])
-
-
-def test_calendar_violations_flags_a_later_expiry_below_an_earlier_one():
-    df = app.load_options("TEST", 6)
-    assert app.calendar_violations(with_k_w(app.otm(df))).empty  # flat vol: w grows with T at every k
-    last = (df.maturity == df.maturity.max()) & (df.strike == 120) & (df.type == "Call")
-    df.loc[last, "implied_vol"] = 0.1  # 0.1^2 * 180/365 is below 0.3^2 * 90/365
-    bad = app.calendar_violations(with_k_w(app.otm(df)))
-    assert list(bad.strike) == [120] and bad.maturity.iloc[0] == df.maturity.max()
-    assert bad.shortfall.iloc[0] == pytest.approx(0.3**2 * 90 / 365 - 0.1**2 * 180 / 365, rel=1e-3)
-
-
 def test_total_variance_and_fitted_surface_figures(monkeypatch):
     monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.3 + 0.002 * (100 - strike))
     df = app.in_range(app.load_options("TEST", 6), 50)
@@ -202,3 +188,16 @@ def test_a_stale_last_trade_moves_neither_forward_nor_fit(monkeypatch):
     assert list(excluded.x) == [110.0]  # the call at 100 is in the money (forward 100.4), off the smile
     fit = next(t for t in traces if t.name.startswith("eSSVI"))
     assert np.allclose(fit.y, VOL, atol=1e-3)
+
+
+def test_a_vol_spike_shows_as_arbitrage_in_the_table_and_on_the_smile(monkeypatch):
+    monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.9 if strike == 110 else 0.3)  # 110 call dearer than 100
+    rows, title = app.update_arbitrage({"ticker": "TEST", "months": 6, "range": 50})
+    front = str(app.expiries(app.load_options("TEST", 6))[0])
+    assert {"check": "vertical", "maturity": front, "strikes": "100/110"}.items() <= next(
+        r for r in rows if r["strikes"] == "100/110"
+    ).items()
+    assert f"{len(rows)} to check" in title and all(r["dollars"] > 0 for r in rows)
+    df = app.load_options("TEST", 6)
+    marks = next(t for t in app.smile(df, app.expiries(df)[0], 100.0).data if t.name == "In an arbitrage")
+    assert 110.0 in marks.x

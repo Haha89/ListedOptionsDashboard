@@ -91,4 +91,18 @@ def test_am_root_alone_expires_at_the_open(monkeypatch):
         return chain
 
     monkeypatch.setattr(FakeTicker, "option_chain", am_only)
-    assert {o.expires_at for o in scrapping.Scrapping.parse_underlying_until("TEST", EXPIRIES[1])} == {OPEN}
+    expected = OPEN if scrapping.settles_at_open("SPX", EXPIRIES[1]) else CLOSE
+    assert {o.expires_at for o in scrapping.Scrapping.parse_underlying_until("TEST", EXPIRIES[1])} == {expected}
+
+
+@pytest.mark.parametrize(
+    "root, expiry, at_open",
+    [
+        ("SPX", date(2026, 11, 20), True),  # third Friday monthly
+        ("SPX", date(2026, 12, 31), False),  # quarterly, listed under SPX by Yahoo but PM-settled
+        ("SPXW", date(2026, 11, 20), False),
+        ("SPY", date(2026, 11, 20), False),
+    ],
+)
+def test_only_third_friday_index_monthlies_settle_at_the_open(root, expiry, at_open):
+    assert scrapping.settles_at_open(root, expiry) is at_open
