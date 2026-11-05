@@ -22,9 +22,12 @@ from src.option_vol.scrapping import Scrapping
 from src.option_vol.utils import to_title
 
 FIELDS = ["implied_vol", "price", "delta", "gamma", "vega", "theta", "rho"]
-COLUMNS = ["name", "strike", "maturity", *FIELDS]
+COLUMNS = ["name", "strike", "maturity", *FIELDS, "bid", "ask", "volume", "open_interest", "usable"]
 DELTAS = (5, 10, 25, 40)
-TABLE_FORMATS = {"implied_vol": ".2%", "price": ".2f", "strike": ".2f"} | dict.fromkeys(FIELDS[2:], ".4f")
+TABLE_FORMATS = {"implied_vol": ".2%", "price": ".2f", "strike": ".2f", "bid": ".2f", "ask": ".2f"} | dict.fromkeys(
+    FIELDS[2:], ".4f"
+)
+MAX_SPREAD = 0.5  # widest usable quote, (ask - bid) / mid
 ATM = "ATM (fwd)"
 ESSVI = "Implied vol, eSSVI fit"
 TICKERS = {  # symbols as Scrapping takes them; indices go through YAHOO_MAPPING
@@ -81,6 +84,7 @@ def load_options(ticker: str, months: int, refresh=False) -> pd.DataFrame:
         if not options:
             raise ValueError(f"no listed options found for {ticker}")
         df = pd.DataFrame([vars(o) for o in options])
+        df["usable"] = usable(df)
         df["div_yield"] = implied_yield(df)
         df["forward"] = df.spot * np.exp((df.r - df.div_yield) * df["T"])
         market = dict(S=df.spot, K=df.strike, T=df["T"], r=df.r, is_call=df.type == "Call", q=df.div_yield)
@@ -91,15 +95,23 @@ def load_options(ticker: str, months: int, refresh=False) -> pd.DataFrame:
     return df[df.maturity <= max_expiry]
 
 
+def usable(df: pd.DataFrame) -> pd.Series:
+    """Quotes the forward, the fit and the arbitrage checks rely on: two-sided, with a spread of at most MAX_SPREAD
+    of the mid. A last trade can be hours or days old, and a minimum-tick quote (0.01 / 0.03) has a mid that says
+    little about the price. When nothing is two-sided (market closed), every quote, so the dashboard still shows
+    the last trades."""
+    good = (df.bid > 0) & (df.ask - df.bid <= MAX_SPREAD * df.price)
+    return good if good.any() else pd.Series(True, index=df.index)
+
+
 def implied_yield(df: pd.DataFrame) -> pd.Series:
     """Per expiry, the continuous yield q making the model forward S e^((r-q)T) equal the market's, read from
     put-call parity F = K + (C - P) e^(rT) at the 3 strikes nearest spot (median). Without it calls and puts of one
     strike give different vols; it absorbs dividends, borrow costs and a spot taken at another time than the quotes.
-    0 for expiries with no call/put pair at a strike."""
-    # shortcut: prices are bid/ask mids or, without a two-sided quote, last trades that can be stale; restrict to
-    # two-sided quotes (keep bid/ask in Scrapping) if the forward looks off on illiquid names
-    calls = df[df.type == "Call"].set_index(["maturity", "strike"])
-    puts = df[df.type == "Put"].set_index(["maturity", "strike"]).price
+    Usable quotes only; 0 for expiries with no usable call/put pair at a strike."""
+    quotes = df[df.usable]
+    calls = quotes[quotes.type == "Call"].set_index(["maturity", "strike"])
+    puts = quotes[quotes.type == "Put"].set_index(["maturity", "strike"]).price
     pairs = calls.assign(put=puts).dropna(subset=["put"])
     strikes = pairs.index.get_level_values("strike")
     pairs["forward"] = strikes + (pairs.price - pairs.put) * np.exp(pairs.r * pairs["T"])
@@ -137,10 +149,12 @@ def by_strike(df: pd.DataFrame, field: str) -> pd.DataFrame:
     return pivot.interpolate(method="index", limit_area="inside")
 
 
-def otm(df: pd.DataFrame) -> pd.DataFrame:
-    """One implied vol per strike from the liquid side: puts below the forward, calls at and above it"""
+def otm(df: pd.DataFrame, usable_only=True) -> pd.DataFrame:
+    """One implied vol per strike from the liquid side: puts below the forward, calls at and above it. Usable quotes
+    only unless usable_only is False."""
     side = ((df.type == "Put") & (df.strike < df.forward)) | ((df.type == "Call") & (df.strike >= df.forward))
-    return df[side & df.implied_vol.notna()].sort_values(["maturity", "strike"])
+    keep = side & df.implied_vol.notna() & (df.usable if usable_only else True)
+    return df[keep].sort_values(["maturity", "strike"])
 
 
 def atm_vol(df: pd.DataFrame) -> pd.Series:
@@ -158,7 +172,9 @@ def atm_vol(df: pd.DataFrame) -> pd.Series:
 def ssvi_fit(df: pd.DataFrame) -> pd.DataFrame:
     """eSSVI slices (theta, rho, psi) per maturity, fitted to the out-of-the-money vols one expiry at a time from the
     shortest, each free of calendar arbitrage against the one before. theta is the market ATM total variance, raised
-    where needed so it never falls with maturity. Expiries with no ATM vol or fewer than 3 vols are left out."""
+    where needed so it never falls with maturity. Expiries with no ATM vol or fewer than 3 vols are left out.
+    Errors are counted in half-spreads, vega x vol error / half-spread, so a tight ATM quote counts more than a wide
+    wing quote; by vega alone when there are no spreads (market closed)."""
     smiles = otm(df)
     atm = atm_vol(df).dropna()
     T = smiles.groupby("maturity")["T"].first().reindex(atm.index)
@@ -169,7 +185,9 @@ def ssvi_fit(df: pd.DataFrame) -> pd.DataFrame:
         if len(smile_) < 3:
             continue
         k = np.log(smile_.strike / smile_.forward)
-        rho, psi = ssvi.fit_slice(k, smile_["T"].iloc[0], theta, smile_.implied_vol, smile_.vega, earlier)
+        half_spread = (smile_.ask - smile_.bid) / 2
+        weight = (smile_.vega / half_spread) ** 2 if (half_spread > 0).all() else smile_.vega**2
+        rho, psi = ssvi.fit_slice(k, smile_["T"].iloc[0], theta, smile_.implied_vol, weight, earlier)
         slices[maturity] = earlier = (theta, rho, psi)
     return pd.DataFrame.from_dict(slices, orient="index", columns=["theta", "rho", "psi"])
 
@@ -264,6 +282,18 @@ def smile(df: pd.DataFrame, expiry: date, spot: float) -> go.Figure:
             for kind in ("Put", "Call")
         ]
     )
+    excluded = otm(df[(df.maturity == expiry) & ~df.usable], usable_only=False)
+    if not excluded.empty:
+        fig.add_scatter(
+            x=excluded.strike,
+            y=excluded.implied_vol,
+            mode="markers",
+            name="Excluded quotes",
+            marker=dict(symbol="circle-open", color=MUTED, size=7),
+            customdata=np.column_stack([excluded.bid, excluded.ask]),
+            hovertemplate="Excluded: one-sided or spread over half the mid<br>Strike %{x:.2f}<br>"
+            "Implied vol %{y:.2%}<br>Bid %{customdata[0]:.2f}, ask %{customdata[1]:.2f}<extra></extra>",
+        )
     fig.add_vline(x=spot, line_dash="dot", line_color=MUTED, annotation_text=f"spot {spot:.2f}")
     atm = atm_vol(chain)
     if atm.notna().any():
@@ -598,6 +628,7 @@ def update(_clicks, ticker, option_type, field, strike_range, months, maturity_i
         rate=f"{df.r.iloc[0]:.2%}",
         front_ATM_vol=f"{atm.iloc[0]:.1%}" if len(atm) else "n/a",
         options=f"{len(view)} {option_type.lower()}s",
+        usable_quotes=f"{df.usable.mean():.0%}" if (df.bid > 0).any() else "none: market closed, last trades",
         expiries=f"{view.maturity.nunique()} to {view.maturity.max():%d %b %y}" if len(view) else "none",
     )
     if view.empty:

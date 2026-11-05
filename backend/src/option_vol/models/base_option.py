@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import math
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from src.option_vol import black_scholes as bs
@@ -6,6 +7,13 @@ from src.option_vol.models import Environment
 from src.option_vol.utils import display_options
 
 NEW_YORK = ZoneInfo("America/New_York")
+CLOSE, OPEN = time(16), time(9, 30)  # US listed options expire at the close; AM-settled index monthlies at the open
+YEAR = 365 * 24 * 3600
+
+
+def year_fraction(maturity: date, expires_at: time = CLOSE) -> float:
+    """Calendar years from now to maturity at expires_at, New York time"""
+    return (datetime.combine(maturity, expires_at, NEW_YORK) - datetime.now(NEW_YORK)).total_seconds() / YEAR
 
 
 class BaseOption:
@@ -13,7 +21,7 @@ class BaseOption:
 
     is_call: bool
 
-    def __init__(self, strike: float, maturity: date, underlying: str, price=None):
+    def __init__(self, strike: float, maturity: date, underlying: str, price=None, expires_at: time = CLOSE):
         self.type = self.__class__.__name__
         self.underlying = underlying
         self.strike = strike
@@ -22,7 +30,10 @@ class BaseOption:
 
         self.name = self.get_name()
         self.implied_vol = None
-        self.T = (self.maturity - datetime.now(NEW_YORK).date()).days / 365  # calendar days -> years
+        self.expires_at = expires_at
+        self.T = year_fraction(maturity, expires_at)
+        self.bid = self.ask = math.nan  # nan when there is no two-sided quote
+        self.volume = self.open_interest = 0
         self.r = Environment().get_risk_free_rate()
         self.spot = Environment().get_spot(self.underlying)
         self.div_yield = 0  # Environment().get_div_yield(self.underlying)

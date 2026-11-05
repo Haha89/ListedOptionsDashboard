@@ -1,6 +1,7 @@
 """Dashboard data path: pricing a chain, filtering it and building the surface, with Yahoo replaced by a fake"""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import app
@@ -15,6 +16,7 @@ def vol_of(strike):  # flat by default; tests swap it for a skew
 
 
 DIV_YIELD = 0.0  # tests swap it to check the implied yield
+STALE = set()  # (type, strike, days) quoted by a last trade 20% off instead of a two-sided quote
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +29,10 @@ def fake_chain(monkeypatch):
         for o in options:
             o.div_yield = globals()["DIV_YIELD"]
             o.price = o.price_with_black_scholes(globals()["vol_of"](o.strike))
+            if (o.type, o.strike, round(o.T * 365)) in globals()["STALE"]:
+                o.price *= 1.2
+            else:
+                o.bid, o.ask = o.price * 0.99, o.price * 1.01
         return options
 
     monkeypatch.setattr(app.Scrapping, "parse_underlying_until", staticmethod(chain))
@@ -176,3 +182,23 @@ def test_total_variance_and_fitted_surface_figures(monkeypatch):
         assert len(lines) == 3 and len(crosses.x) == 0
     fitted, dots = app.surface(app.vol_view(df, 50), "essvi_vol").data
     assert np.isfinite(fitted.z).all() and len(dots.z) == len(app.otm(df))
+
+
+def test_usable_quotes_are_two_sided_and_tight():
+    quotes = pd.DataFrame({"bid": [1.0, 0.01, np.nan], "ask": [1.2, 0.03, np.nan], "price": [1.1, 0.02, 0.5]})
+    assert list(app.usable(quotes)) == [True, False, False]  # spread 18% of mid, 100%, one-sided
+    closed = quotes.assign(bid=np.nan, ask=np.nan)
+    assert app.usable(closed).all()  # nothing two-sided: market closed, fall back on last trades
+
+
+def test_a_stale_last_trade_moves_neither_forward_nor_fit(monkeypatch):
+    monkeypatch.setitem(globals(), "STALE", {("Call", 100, 30), ("Call", 110, 30)})
+    df = app.load_options("TEST", 6)
+    assert np.allclose(df.div_yield, 0.0)  # 2 of the 3 strikes nearest spot: the median would not hide them
+    assert df.usable.sum() == len(df) - 2
+    front = app.expiries(df)[0]
+    traces = app.smile(app.in_range(df, 50), front, 100.0).data
+    excluded = next(t for t in traces if t.name == "Excluded quotes")
+    assert list(excluded.x) == [110.0]  # the call at 100 is in the money (forward 100.4), off the smile
+    fit = next(t for t in traces if t.name.startswith("eSSVI"))
+    assert np.allclose(fit.y, VOL, atol=1e-3)
