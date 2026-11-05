@@ -91,11 +91,26 @@ def test_by_delta_follows_the_skew(monkeypatch):
 
 def test_smile_is_otm_puts_then_otm_calls():
     df = app.load_options("TEST", 6)
-    puts, calls, atm = app.smile(app.in_range(df, 50), app.expiries(df)[0], 100.0).data
+    puts, calls, atm, fit = app.smile(app.in_range(df, 50), app.expiries(df)[0], 100.0).data
     forward = 100 * np.exp(0.05 * df["T"].min())  # nearest expiry, no dividend
     assert atm.x[0] == pytest.approx(forward) and atm.y[0] == pytest.approx(VOL)
     assert puts.name == "OTM puts" and max(puts.x) < forward <= min(calls.x) and calls.name == "OTM calls"
     assert np.allclose(np.concatenate([puts.y, calls.y]), VOL)
+    assert fit.name.startswith("eSSVI fit") and np.allclose(fit.y, VOL, atol=1e-3)
+
+
+def test_ssvi_fit_follows_a_put_skew_without_calendar_arbitrage(monkeypatch):
+    monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.3 + 0.002 * (100 - strike))
+    df = app.load_options("TEST", 6)
+    fitted = app.ssvi_fit(df)
+    assert len(fitted) == 3 and (fitted.rho < -0.5).all() and fitted.theta.is_monotonic_increasing
+    for earlier, later in zip(fitted.to_numpy(), fitted.to_numpy()[1:]):
+        assert app.ssvi.calendar_margin(earlier, later).min() >= -1e-9
+    smiles = app.otm(df).join(fitted.add_prefix("ssvi_"), on="maturity")  # the chain has greeks theta and rho
+    k = np.log(smiles.strike / smiles.forward)
+    errors = app.ssvi.vol(k, smiles["T"], smiles.ssvi_theta, smiles.ssvi_rho, smiles.ssvi_psi) - smiles.implied_vol
+    near = (smiles.strike / 100 - 1).abs() <= 0.2  # a linear skew is not an SSVI smile; it should match near the money
+    assert errors[near].abs().max() < 0.01
 
 
 def test_implied_yield_recovers_dividend_and_aligns_call_and_put_vols(monkeypatch):
@@ -137,3 +152,27 @@ def test_vol_view_takes_the_otm_side_whatever_the_quotes_in_the_money(monkeypatc
     assert set(view.strike) == {90, 100, 110} and not view.duplicated(["maturity", "strike"]).any()
     assert np.allclose(view.implied_vol, VOL)  # the 90 strike comes from the put
     assert set(view[view.strike == 90].type) == {"Put"}
+
+
+def with_k_w(smiles):
+    return smiles.assign(k=np.log(smiles.strike / smiles.forward), w=smiles.implied_vol**2 * smiles["T"])
+
+
+def test_calendar_violations_flags_a_later_expiry_below_an_earlier_one():
+    df = app.load_options("TEST", 6)
+    assert app.calendar_violations(with_k_w(app.otm(df))).empty  # flat vol: w grows with T at every k
+    last = (df.maturity == df.maturity.max()) & (df.strike == 120) & (df.type == "Call")
+    df.loc[last, "implied_vol"] = 0.1  # 0.1^2 * 180/365 is below 0.3^2 * 90/365
+    bad = app.calendar_violations(with_k_w(app.otm(df)))
+    assert list(bad.strike) == [120] and bad.maturity.iloc[0] == df.maturity.max()
+    assert bad.shortfall.iloc[0] == pytest.approx(0.3**2 * 90 / 365 - 0.1**2 * 180 / 365, rel=1e-3)
+
+
+def test_total_variance_and_fitted_surface_figures(monkeypatch):
+    monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.3 + 0.002 * (100 - strike))
+    df = app.in_range(app.load_options("TEST", 6), 50)
+    for source in ("market", "fit"):
+        *lines, crosses = app.total_variance(df, source).data
+        assert len(lines) == 3 and len(crosses.x) == 0
+    fitted, dots = app.surface(app.vol_view(df, 50), "essvi_vol").data
+    assert np.isfinite(fitted.z).all() and len(dots.z) == len(app.otm(df))
