@@ -201,3 +201,35 @@ def test_a_vol_spike_shows_as_arbitrage_in_the_table_and_on_the_smile(monkeypatc
     df = app.load_options("TEST", 6)
     marks = next(t for t in app.smile(df, app.expiries(df)[0], 100.0).data if t.name == "In an arbitrage")
     assert 110.0 in marks.x
+
+
+def test_one_fit_per_snapshot(monkeypatch):
+    monkeypatch.setattr(app, "_fits", {})
+    fits = []
+    fit = app.ssvi_fit
+    monkeypatch.setattr(app, "ssvi_fit", lambda df: fits.append(1) or fit(df))
+    first = app.fit_for("TEST", 6, 50)
+    assert app.fit_for("TEST", 6, 50) is first and len(fits) == 1
+    app.load_options("TEST", 6, refresh=True)  # new snapshot: refit, and the old fit goes
+    app.fit_for("TEST", 6, 50)
+    assert len(fits) == 2 and len(app._fits) == 1
+
+
+def test_fitted_heatmap_by_delta_matches_the_market_on_a_skew(monkeypatch):
+    monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.3 + 0.002 * (100 - strike))
+    df = app.load_options("TEST", 6)
+    fitted = app.fit_for("TEST", 6, 20)
+    quoted, fit = app.by_delta(df), app.by_delta(app.fitted_smiles(df, fitted))
+    inner = ["25Δ put", "40Δ put", app.ATM, "40Δ call", "25Δ call"]
+    assert np.abs(fit.loc[inner] - quoted.loc[inner]).max().max() < 0.01
+
+
+def test_residuals_and_bid_ask_bars():
+    df = app.load_options("TEST", 6)
+    found = app.residuals(df, app.ssvi_fit(df))
+    assert len(found) == len(app.otm(df)) and found.error.abs().max() < 1e-3  # flat 30% is an SSVI smile
+    assert found.spreads.abs().is_monotonic_decreasing
+    df.loc[app.otm(df).index[0], "ask"] = df.loc[app.otm(df).index[0], "bid"]  # bid = ask: no ratio, sorted last
+    assert np.isnan(app.residuals(df, app.ssvi_fit(df)).spreads.iloc[-1])
+    puts = app.smile(df, app.expiries(df)[0], 100.0).data[0]
+    assert (np.asarray(puts.error_y.array) > 0).all() and (np.asarray(puts.error_y.arrayminus) > 0).all()

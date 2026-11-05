@@ -27,6 +27,7 @@ DELTAS = (5, 10, 25, 40)
 TABLE_FORMATS = {"implied_vol": ".2%", "price": ".2f", "strike": ".2f", "bid": ".2f", "ask": ".2f"} | dict.fromkeys(
     FIELDS[2:], ".4f"
 )
+PERCENT = {"function": "params.value == null ? '' : d3.format('.2%')(params.value)"}
 MAX_SPREAD = 0.5  # widest usable quote, (ask - bid) / mid
 ATM = "ATM (fwd)"
 ESSVI = "Implied vol, eSSVI fit"
@@ -71,6 +72,7 @@ pio.templates["desk"] = go.layout.Template(
 pio.templates.default = "plotly_white+desk"
 # shortcut: per-process, never evicted; fine for one user, use flask-caching to share between gunicorn workers
 _cache: dict = {}
+_fits: dict = {}  # eSSVI fits by (ticker, months, strike range, snapshot time)
 
 
 def load_options(ticker: str, months: int, refresh=False) -> pd.DataFrame:
@@ -90,6 +92,8 @@ def load_options(ticker: str, months: int, refresh=False) -> pd.DataFrame:
         df["forward"] = df.spot * np.exp((df.r - df.div_yield) * df["T"])
         market = dict(S=df.spot, K=df.strike, T=df["T"], r=df.r, is_call=df.type == "Call", q=df.div_yield)
         df["implied_vol"] = bs.implied_vol(df.price, **market)
+        df["bid_vol"] = bs.implied_vol(df.bid, **market)  # nan without a bid, or a bid below intrinsic
+        df["ask_vol"] = bs.implied_vol(df.ask, **market)
         df = df.assign(**bs.greeks(vol=df.implied_vol, **market))
         hit = _cache[ticker] = (time.monotonic(), max_expiry, df)
     df = hit[2]
@@ -170,6 +174,17 @@ def atm_vol(df: pd.DataFrame) -> pd.Series:
     )
 
 
+def fit_for(ticker: str, months: int, strike_range: float) -> pd.DataFrame:
+    """ssvi_fit of the chain within strike_range, computed once per snapshot: every chart shares it"""
+    df = in_range(load_options(ticker, months), strike_range)
+    key = (ticker, months, strike_range, _cache[ticker][0])
+    if key not in _fits:
+        for old in [k for k in _fits if k[0] == ticker and k[3] != key[3]]:  # fits of an older snapshot
+            del _fits[old]
+        _fits[key] = ssvi_fit(df)
+    return _fits[key]
+
+
 def ssvi_fit(df: pd.DataFrame) -> pd.DataFrame:
     """eSSVI slices (theta, rho, psi) per maturity, fitted to the out-of-the-money vols one expiry at a time from the
     shortest, each free of calendar arbitrage against the one before. theta is the market ATM total variance, raised
@@ -215,9 +230,11 @@ def by_delta(df: pd.DataFrame) -> pd.DataFrame:
     return grid
 
 
-def fitted_vols(df: pd.DataFrame, points=60) -> pd.DataFrame:
-    """eSSVI vols on a strike x maturity grid spanning df's strikes, for the expiries the fit covers"""
-    fitted = ssvi_fit(df)
+def fitted_vols(df: pd.DataFrame, fitted: pd.DataFrame | None = None, points=60) -> pd.DataFrame:
+    """eSSVI vols on a strike x maturity grid spanning df's strikes, for the expiries the fit covers (fitted, or
+    fitted to df when None)"""
+    fitted = ssvi_fit(df) if fitted is None else fitted
+    fitted = fitted[fitted.index.isin(df.maturity)]
     strikes = np.linspace(df.strike.min(), df.strike.max(), points)
     first = df.groupby("maturity")[["T", "forward"]].first()
     return pd.DataFrame(
@@ -226,10 +243,28 @@ def fitted_vols(df: pd.DataFrame, points=60) -> pd.DataFrame:
     )
 
 
-def surface(df: pd.DataFrame, field: str) -> go.Figure:
+def fitted_smiles(df: pd.DataFrame, fitted: pd.DataFrame, points=81) -> pd.DataFrame:
+    """Out-of-the-money quotes made from the eSSVI fit, on a strike grid spanning df's strikes for each expiry the fit
+    covers, shaped like df so by_delta and atm_vol read them as they read the market"""
+    first = df.groupby("maturity")[["T", "forward", "spot", "r", "div_yield"]].first()
+    strikes = np.linspace(df.strike.min(), df.strike.max(), points)
+    rows = [
+        pd.DataFrame({"maturity": m, "strike": strikes, **first.loc[m]}).assign(
+            implied_vol=ssvi.vol(np.log(strikes / first.forward[m]), first["T"][m], *fitted.loc[m])
+        )
+        for m in fitted.index
+        if m in first.index
+    ]
+    if not rows:
+        return df.iloc[:0]
+    smiles = pd.concat(rows, ignore_index=True)
+    return smiles.assign(type=np.where(smiles.strike < smiles.forward, "Put", "Call"), usable=True)
+
+
+def surface(df: pd.DataFrame, field: str, fitted: pd.DataFrame | None = None) -> go.Figure:
     """field against strike and expiry; for essvi_vol the fitted surface with the market vols as dots"""
     is_vol = field in ("implied_vol", "essvi_vol")
-    pivot = fitted_vols(df) if field == "essvi_vol" else by_strike(df, field)
+    pivot = fitted_vols(df, fitted) if field == "essvi_vol" else by_strike(df, field)
     label = ESSVI if field == "essvi_vol" else to_title(field)
     value = "%{z:.2%}" if is_vol else f"%{{z:.{2 if field == 'price' else 4}f}}"
     fig = go.Figure(
@@ -267,20 +302,31 @@ def surface(df: pd.DataFrame, field: str) -> go.Figure:
     return fig
 
 
-def smile(df: pd.DataFrame, expiry: date, spot: float) -> go.Figure:
-    """Implied vol against strike for one expiry: puts below the forward, calls above, the out-of-the-money side, and
-    the eSSVI curve fitted to df"""
+def smile(df: pd.DataFrame, expiry: date, spot: float, fitted: pd.DataFrame | None = None) -> go.Figure:
+    """Implied vol against strike for one expiry: puts below the forward, calls above, the out-of-the-money side, with
+    bars from the bid vol to the ask vol, and the eSSVI curve (fitted, or fitted to df when None)"""
     chain = otm(df[df.maturity == expiry])
     fig = go.Figure(
         [
             go.Scatter(
-                x=chain[chain.type == kind].strike,
-                y=chain[chain.type == kind].implied_vol,
+                x=side.strike,
+                y=side.implied_vol,
                 mode="markers",
                 name=f"OTM {kind.lower()}s",
-                hovertemplate="Strike %{x:.2f}<br>Implied vol %{y:.2%}<extra></extra>",
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=(side.ask_vol - side.implied_vol).fillna(0),
+                    arrayminus=(side.implied_vol - side.bid_vol).fillna(0),
+                    thickness=1,
+                    width=0,
+                ),
+                customdata=np.column_stack([side.bid_vol, side.ask_vol]),
+                hovertemplate="Strike %{x:.2f}<br>Implied vol %{y:.2%}<br>bid %{customdata[0]:.2%}, "
+                "ask %{customdata[1]:.2%}<extra></extra>",
             )
             for kind in ("Put", "Call")
+            for side in [chain[chain.type == kind]]
         ]
     )
     excluded = otm(df[(df.maturity == expiry) & ~df.usable], usable_only=False)
@@ -326,7 +372,7 @@ def smile(df: pd.DataFrame, expiry: date, spot: float) -> go.Figure:
             marker=dict(size=11, symbol="diamond", color=INK),
             hovertemplate="ATM, strike = forward %{x:.2f}<br>Implied vol %{y:.2%}<extra></extra>",
         )
-    fitted = ssvi_fit(df)
+    fitted = ssvi_fit(df) if fitted is None else fitted
     if expiry in fitted.index and not chain.empty:
         theta, rho, psi = fitted.loc[expiry]
         strikes = np.linspace(chain.strike.min(), chain.strike.max(), 200)
@@ -344,10 +390,10 @@ def smile(df: pd.DataFrame, expiry: date, spot: float) -> go.Figure:
         )
     fig.update_layout(
         title=f"Smile, {expiry:%d %b %y} expiry",
-        margin=MARGIN,
+        margin=MARGIN | dict(b=110),
         xaxis_title="Strike",
         yaxis=dict(title="Implied vol", tickformat=".0%"),
-        legend=dict(orientation="h", x=1, xanchor="right", y=1.02, yanchor="bottom"),
+        legend=dict(orientation="h", x=0, y=-0.22, yanchor="top"),
     )
     return fig
 
@@ -383,7 +429,7 @@ def heatmap(grid: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
-def delta_heatmap(df: pd.DataFrame) -> go.Figure:
+def delta_heatmap(df: pd.DataFrame, source: str = "market") -> go.Figure:
     """Vols by delta on top; risk reversals and butterflies below, on their own scale centred on 0"""
     grid = by_delta(df)
     spreads = rr_bf(grid)
@@ -406,11 +452,26 @@ def delta_heatmap(df: pd.DataFrame) -> go.Figure:
     )
     fig.update_xaxes(type="category")
     fig.update_xaxes(title="Expiry", row=2, col=1)
-    fig.update_layout(title="Implied vol by delta, risk reversals and butterflies", margin=MARGIN)
+    fig.update_layout(title=f"Implied vol by delta, risk reversals and butterflies, {source}", margin=MARGIN)
     return fig
 
 
-def total_variance(df: pd.DataFrame, source: str) -> go.Figure:
+def residuals(df: pd.DataFrame, fitted: pd.DataFrame) -> pd.DataFrame:
+    """Usable out-of-the-money quotes and how far the eSSVI fit is from each: in vol and in half-spreads
+    (vega x vol error / half-spread, the price error measured in what it costs to cross the quote), largest first"""
+    smiles = otm(df).join(fitted.add_prefix("fit_"), on="maturity", how="inner")  # the chain has greeks theta, rho
+    if smiles.empty:
+        return smiles.assign(fit_vol=[], error=[], spreads=[])
+    smiles["fit_vol"] = ssvi.vol(
+        np.log(smiles.strike / smiles.forward), smiles["T"], smiles.fit_theta, smiles.fit_rho, smiles.fit_psi
+    )
+    smiles["error"] = smiles.fit_vol - smiles.implied_vol
+    half_spread = ((smiles.ask - smiles.bid) / 2).where(lambda h: h > 0)  # Yahoo sometimes has bid = ask
+    smiles["spreads"] = smiles.vega * smiles.error / half_spread
+    return smiles.sort_values("spreads", key=abs, ascending=False, na_position="last")
+
+
+def total_variance(df: pd.DataFrame, source: str, fitted: pd.DataFrame | None = None) -> go.Figure:
     """Total variance vol^2 T against log-moneyness, one line per expiry, from market vols or the eSSVI fit. Without
     calendar arbitrage a later expiry's line never dips below an earlier one's; red crosses mark calendar arbitrage
     on executable prices (a later expiry's ask below an earlier one's bid, in total variance)."""
@@ -418,7 +479,7 @@ def total_variance(df: pd.DataFrame, source: str) -> go.Figure:
     if smiles.empty:
         return empty("No data")
     smiles = smiles.assign(k=np.log(smiles.strike / smiles.forward), w=smiles.implied_vol**2 * smiles["T"])
-    fitted = ssvi_fit(df) if source == "fit" else None
+    fitted = (ssvi_fit(df) if fitted is None else fitted) if source == "fit" else None
     dates = expiries(smiles)
     colors = sample_colorscale("Blues", list(np.linspace(0.3, 1, len(dates))) if len(dates) > 1 else [1.0])
     fig = go.Figure()
@@ -545,6 +606,12 @@ app.layout = html.Div(
                                 id="heatmap-axis",
                                 inline=True,
                             ),
+                            dcc.RadioItems(
+                                [{"label": "Market", "value": "market"}, {"label": "eSSVI fit", "value": "fit"}],
+                                "market",
+                                id="heatmap-source",
+                                inline=True,
+                            ),
                             dcc.Graph(id="heatmap", className="chart"),
                         ),
                     ],
@@ -569,6 +636,30 @@ app.layout = html.Div(
                             dcc.Graph(id="total-variance", className="chart"),
                         ),
                     ],
+                ),
+                card(
+                    html.H2("Quotes furthest from the eSSVI fit", className="card-title"),
+                    dag.AgGrid(
+                        id="residuals",
+                        rowData=[],
+                        columnDefs=[
+                            {"field": "maturity", "headerName": "Expiry"},
+                            {"field": "type", "headerName": "Type"},
+                            {"field": "strike", "headerName": "Strike"},
+                            {"field": "implied_vol", "headerName": "Market vol", "valueFormatter": PERCENT},
+                            {"field": "fit_vol", "headerName": "Fit vol", "valueFormatter": PERCENT},
+                            {"field": "error", "headerName": "Fit - market", "valueFormatter": PERCENT},
+                            {
+                                "field": "spreads",
+                                "headerName": "In half-spreads",
+                                "valueFormatter": {
+                                    "function": "params.value == null ? '' : d3.format('+.1f')(params.value)"
+                                },
+                            },
+                        ],
+                        defaultColDef={"sortable": True, "filter": True, "flex": 1},
+                        dashGridOptions={"pagination": True, "paginationPageSize": 10, "domLayout": "autoHeight"},
+                    ),
                 ),
                 card(
                     html.H2(id="arbitrage-title", className="card-title"),
@@ -660,8 +751,9 @@ def update(_clicks, ticker, option_type, field, strike_range, months, maturity_i
     if view.empty:
         widen = f"No {option_type.lower()}s within ± {strike_range}% of spot. Widen the strike range."
         return empty(widen), [], status, loaded, *slider
+    fitted = fit_for(ticker, months, strike_range) if field == "essvi_vol" else None
     return (
-        surface(vol_view(df, strike_range) if field in ("implied_vol", "essvi_vol") else view, field),
+        surface(vol_view(df, strike_range) if field in ("implied_vol", "essvi_vol") else view, field, fitted),
         view[COLUMNS].round(5).to_dict("records"),
         status,
         loaded,
@@ -675,14 +767,29 @@ def update_smile(maturity_index, loaded):
         return empty("No data")
     df = load_options(loaded["ticker"], loaded["months"])
     dates = expiries(df)  # the slider indexes the same list
-    return smile(in_range(df, loaded["range"]), dates[min(maturity_index, len(dates) - 1)], df.spot.iloc[0])
+    fitted = fit_for(loaded["ticker"], loaded["months"], loaded["range"])
+    expiry = dates[min(maturity_index, len(dates) - 1)]
+    return smile(in_range(df, loaded["range"]), expiry, df.spot.iloc[0], fitted)
 
 
-@app.callback(Output("heatmap", "figure"), Input("heatmap-axis", "value"), Input("loaded", "data"))
-def update_heatmap(axis, loaded):
+@app.callback(
+    Output("heatmap", "figure"),
+    Input("heatmap-axis", "value"),
+    Input("heatmap-source", "value"),
+    Input("loaded", "data"),
+)
+def update_heatmap(axis, source, loaded):
+    """By delta reads the whole chain (the 5-delta wings are often beyond the strike range); the fit, within the
+    strike range, is extended over the whole chain's strikes, arbitrage-free"""
     if not loaded:
         return empty("No data")
     df = load_options(loaded["ticker"], loaded["months"])
+    if source == "fit":
+        fitted = fit_for(loaded["ticker"], loaded["months"], loaded["range"])
+        if axis == "delta":
+            return delta_heatmap(fitted_smiles(df, fitted), "eSSVI fit")
+        grid = fitted_vols(in_range(df, loaded["range"]), fitted)
+        return heatmap(grid, "Implied vol by strike, eSSVI fit")
     if axis == "delta":
         return delta_heatmap(df)
     return heatmap(by_strike(vol_view(df, loaded["range"]), "implied_vol"), "Implied vol by strike (OTM)")
@@ -692,7 +799,8 @@ def update_heatmap(axis, loaded):
 def update_total_variance(source, loaded):
     if not loaded:
         return empty("No data")
-    return total_variance(in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"]), source)
+    fitted = fit_for(loaded["ticker"], loaded["months"], loaded["range"])
+    return total_variance(in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"]), source, fitted)
 
 
 @app.callback(Output("arbitrage", "rowData"), Output("arbitrage-title", "children"), Input("loaded", "data"))
@@ -708,6 +816,16 @@ def update_arbitrage(loaded):
     )
     rows = found.assign(dollars=found.profit * MULTIPLIER, maturity=found.maturity.astype(str))
     return rows.drop(columns=["k", "w", "profit"], errors="ignore").to_dict("records"), title
+
+
+@app.callback(Output("residuals", "rowData"), Input("loaded", "data"))
+def update_residuals(loaded):
+    if not loaded:
+        return []
+    df = in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"])
+    found = residuals(df, fit_for(loaded["ticker"], loaded["months"], loaded["range"]))
+    columns = ["maturity", "type", "strike", "implied_vol", "fit_vol", "error", "spreads"]
+    return found[columns].head(200).astype({"maturity": str}).to_dict("records")
 
 
 if __name__ == "__main__":
