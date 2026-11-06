@@ -1,3 +1,15 @@
+/* IBM Plex Sans, variable weight, served locally (assets/fonts, SIL Open Font License in fonts/OFL.txt) */
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 100 700; font-display: swap;
+  src: url("fonts/IBMPlexSans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {  /* σ, Δ, ρ, ψ in chart labels */
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 100 700; font-display: swap;
+  src: url("fonts/IBMPlexSans-greek.woff2") format("woff2");
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
 :root {
   --paper: #f3f5f7; --surface: #fff; --ink: #18212e; --muted: #5d6878; --rule: #dce1e7;
   --put: #2f6db5; --call: #c7870f; --error: #b3261e;

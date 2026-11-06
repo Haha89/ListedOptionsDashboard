@@ -550,11 +550,7 @@ def card(*children, class_name="card"):
     return html.Div(className=class_name, children=list(children))
 
 
-app = Dash(
-    __name__,
-    title="Listed options dashboard",
-    external_stylesheets=["https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"],
-)
+app = Dash(__name__, title="Listed options dashboard")
 app.layout = html.Div(
     className="page",
     children=[
