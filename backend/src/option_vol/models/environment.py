@@ -1,5 +1,6 @@
-from datetime import date
+import math
 
+import pandas as pd
 from yfinance import Ticker, download
 
 from src.option_vol.utils import YAHOO_MAPPING
@@ -55,19 +56,15 @@ class Environment(Singleton):
         return content[underlying]
 
     @staticmethod
-    def get_dividend_yield(underlying):
+    def get_dividend_yield(underlying) -> float:
+        """Dividends paid over the last 365 days over spot; nan for indices, whose dividends Yahoo doesn't list"""
+        if underlying in YAHOO_MAPPING:
+            return math.nan
         divs = Ticker(underlying).dividends
         if divs.empty:
-            return 0
-
-        last10y = divs[divs.index.year > (date.today().year - 10)]
-        last10y = last10y.groupby(last10y.index.year).sum()
-
-        tot_div = divs[[x >= date(2022, 1, 1) for x in divs.index]].sum()
-        last_spot_year = download(
-            tickers=underlying, start=f"{last10y.index[0]}-12-31", end=f"{last10y.index[-1]}-12-31", interval="1m"
-        )["Adj Close"][0]
-        return tot_div / last_spot_year
+            return 0.0
+        last_year = divs[divs.index >= divs.index[-1].now(divs.index.tz) - pd.Timedelta(days=365)]
+        return float(last_year.sum()) / Environment().get_spot(underlying)
 
     @staticmethod
     def _get_spot(underlying):
