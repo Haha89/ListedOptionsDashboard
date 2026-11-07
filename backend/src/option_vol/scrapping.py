@@ -37,6 +37,8 @@ class Scrapping:
         options = []
         for expiry, chain in zip(expiries, chains):
             for cls, quotes in ((Call, chain.calls), (Put, chain.puts)):
+                if quotes.empty:  # e.g. NDX 2026-12-03 puts; Yahoo's empty table has float columns, no .str
+                    continue
                 roots = quotes.contractSymbol.str.extract(r"^([A-Z]+)\d", expand=False)
                 if roots.nunique() > 1:
                     quotes, roots = quotes[~roots.isin(AM_SETTLED)], roots[~roots.isin(AM_SETTLED)]

@@ -106,3 +106,15 @@ def test_am_root_alone_expires_at_the_open(monkeypatch):
 )
 def test_only_third_friday_index_monthlies_settle_at_the_open(root, expiry, at_open):
     assert scrapping.settles_at_open(root, expiry) is at_open
+
+
+def test_an_expiry_without_puts(monkeypatch):
+    option_chain = FakeTicker.option_chain
+
+    def no_puts(self, expiry):
+        chain = option_chain(self, expiry)
+        return SimpleNamespace(calls=chain.calls, puts=pd.DataFrame(columns=chain.puts.columns, dtype=float))
+
+    monkeypatch.setattr(FakeTicker, "option_chain", no_puts)
+    options = scrapping.Scrapping.parse_underlying_until("TEST", EXPIRIES[1])
+    assert {o.type for o in options} == {"Call"} and len(options) == 2
