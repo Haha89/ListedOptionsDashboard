@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
-from dash import Dash, Input, Output, State, ctx, dcc, html
+from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
 from dateutil.relativedelta import relativedelta
 from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
 
-from src.option_vol import arbitrage, ssvi
+from src.option_vol import arbitrage, ssvi, strategy
 from src.option_vol import black_scholes as bs
 from src.option_vol.models import Environment
 from src.option_vol.scrapping import Scrapping
@@ -28,9 +28,15 @@ TABLE_FORMATS = {"implied_vol": ".2%", "price": ".2f", "strike": ".2f", "bid": "
     FIELDS[2:], ".4f"
 )
 PERCENT = {"function": "params.value == null ? '' : d3.format('.2%')(params.value)"}
+DOLLARS = {"function": "params.value == null ? '' : d3.format(',.2f')(params.value)"}
+WIDTHS = (0.025, 0.05, 0.1, 0.2)  # strategy strikes apart, fraction of spot
 MAX_SPREAD = 0.5  # widest usable quote, (ask - bid) / mid
+PARITY_TOL = 0.0025  # a call/put pair whose bid/ask forward misses the expiry's by more is stale, fraction of F
+PARITY_PAIRS = 9  # pairs nearest spot whose median forward is the expiry's
 ATM = "ATM (fwd)"
 ESSVI = "Implied vol, eSSVI fit"
+SOURCES = [{"label": "Market", "value": "market"}, {"label": "eSSVI fit", "value": "fit"}]
+VOL_MODES = [{"label": "Own vols", "value": "own"}, {"label": "eSSVI vols", "value": "fit"}]
 TICKERS = {  # symbols as Scrapping takes them; indices go through YAHOO_MAPPING
     "SPX": "S&P 500 index",
     "SPY": "S&P 500 ETF",
@@ -56,6 +62,10 @@ MULTIPLIER = 100  # underlying units per listed US option contract
 MARGIN = dict(l=50, r=10, b=40, t=50)
 INK, MUTED, RULE, PUT, CALL, ERROR = "#18212e", "#5d6878", "#dce1e7", "#2f6db5", "#c7870f", "#b3261e"
 FONT = "IBM Plex Sans, system-ui, sans-serif"
+GRID_THEME = {  # AG Grid's Balham theme in the page's palette; built in, unlike dag.themes.BALHAM, a CDN stylesheet
+    "function": f"themeBalham.withParams({{fontFamily: '{FONT}', foregroundColor: '{INK}', accentColor: '{PUT}', "
+    f"borderColor: '{RULE}', headerBackgroundColor: '#f3f5f7'}})"
+}
 VOL_SCALE = "Cividis"  # perceptually uniform and colorblind-safe, unlike a rainbow scale
 pio.templates["desk"] = go.layout.Template(
     layout=dict(
@@ -88,8 +98,10 @@ def load_options(ticker: str, months: int, refresh=False) -> pd.DataFrame:
             raise ValueError(f"no listed options found for {ticker}")
         df = pd.DataFrame([vars(o) for o in options])
         df["usable"] = usable(df)
-        df["div_yield"] = implied_yield(df)
-        df["forward"] = df.spot * np.exp((df.r - df.div_yield) * df["T"])
+        for _ in range(2):  # the second pass reads the forward without the pairs the first one found stale
+            df["div_yield"] = implied_yield(df)
+            df["forward"] = df.spot * np.exp((df.r - df.div_yield) * df["T"])
+            df["usable"] &= ~parity_breaks(df)
         market = dict(S=df.spot, K=df.strike, T=df["T"], r=df.r, is_call=df.type == "Call", q=df.div_yield)
         df["implied_vol"] = bs.implied_vol(df.price, **market)
         df["bid_vol"] = bs.implied_vol(df.bid, **market)  # nan without a bid, or a bid below intrinsic
@@ -111,9 +123,10 @@ def usable(df: pd.DataFrame) -> pd.Series:
 
 def implied_yield(df: pd.DataFrame) -> pd.Series:
     """Per expiry, the continuous yield q making the model forward S e^((r-q)T) equal the market's, read from
-    put-call parity F = K + (C - P) e^(rT) at the 3 strikes nearest spot (median). Without it calls and puts of one
-    strike give different vols; it absorbs dividends, borrow costs and a spot taken at another time than the quotes.
-    Usable quotes only; 0 for expiries with no usable call/put pair at a strike."""
+    put-call parity F = K + (C - P) e^(rT) at the PARITY_PAIRS strikes nearest spot (median: a few stale pairs among
+    them don't move it). Without it calls and puts of one strike give different vols; it absorbs dividends, borrow
+    costs and a spot taken at another time than the quotes. Usable quotes only; 0 for expiries with no usable
+    call/put pair at a strike."""
     quotes = df[df.usable]
     calls = quotes[quotes.type == "Call"].set_index(["maturity", "strike"])
     puts = quotes[quotes.type == "Put"].set_index(["maturity", "strike"]).price
@@ -121,10 +134,33 @@ def implied_yield(df: pd.DataFrame) -> pd.Series:
     strikes = pairs.index.get_level_values("strike")
     pairs["forward"] = strikes + (pairs.price - pairs.put) * np.exp(pairs.r * pairs["T"])
     pairs["distance"] = abs(strikes / pairs.spot - 1)
-    nearest = pairs.sort_values("distance").groupby(level="maturity").head(3).groupby(level="maturity")
+    nearest = pairs.sort_values("distance").groupby(level="maturity").head(PARITY_PAIRS).groupby(level="maturity")
     first = nearest[["spot", "r", "T"]].first()
     q = first.r - np.log(nearest.forward.median() / first.spot) / first["T"]
     return df.maturity.map(q).fillna(0.0)
+
+
+def parity_pairs(df: pd.DataFrame) -> pd.DataFrame:
+    """Two-sided call/put pairs by (maturity, strike), with the forward range their bid/ask allows: a reversal (buy
+    the call, sell the put, short the forward) pays if F < low, a conversion if F > high"""
+    quotes = df[(df.bid > 0) & (df.ask > 0)]
+    calls = quotes[quotes.type == "Call"].set_index(["maturity", "strike"])
+    puts = quotes[quotes.type == "Put"].set_index(["maturity", "strike"])[["bid", "ask"]].add_suffix("_put")
+    pairs = calls[["bid", "ask", "spot", "r", "T", "forward", "usable"]].join(puts, how="inner")
+    strikes, growth = pairs.index.get_level_values("strike"), np.exp(pairs.r * pairs["T"])
+    pairs["low"] = strikes + (pairs.bid - pairs.ask_put) * growth
+    pairs["high"] = strikes + (pairs.ask - pairs.bid_put) * growth
+    pairs["miss"] = np.maximum(pairs.low - pairs.forward, pairs.forward - pairs.high).clip(lower=0) / pairs.forward
+    return pairs
+
+
+def parity_breaks(df: pd.DataFrame) -> pd.Series:
+    """Both quotes of each call/put pair whose bid/ask can't reach the expiry's forward within PARITY_TOL. On a free
+    feed that is one stale quote, not a conversion to trade: calls and puts of one strike quoted vols 40 points
+    apart made the $359k NDX boxes. American early exercise moves an in-the-money pair's forward by far less."""
+    pairs = parity_pairs(df)
+    stale = pairs.index[pairs.miss > PARITY_TOL]
+    return pd.Series(pd.MultiIndex.from_frame(df[["maturity", "strike"]]).isin(stale), index=df.index)
 
 
 def in_range(df: pd.DataFrame, strike_range: float) -> pd.DataFrame:
@@ -289,11 +325,15 @@ def surface(df: pd.DataFrame, field: str, fitted: pd.DataFrame | None = None) ->
             hovertemplate="Strike %{y:.2f}<br>Expiry %{x|%Y-%m-%d}<br>Market implied vol %{z:.2%}<extra></extra>",
         )
     fig.update_layout(
-        title=f"{label} surface",
+        title=dict(text=f"{label} surface", subtitle=dict(text="Click a point for its smile and term structure")),
         margin=dict(l=0, r=0, b=0, t=40),
         uirevision="keep",
         showlegend=False,
         scene=dict(
+            camera=dict(
+                eye=dict(x=1.7, y=1.7, z=1.0), center=dict(x=0, y=0, z=-0.2)
+            ),  # keeps all labels in the narrow card
+            aspectratio=dict(x=1, y=1, z=0.8),
             xaxis_title="Expiry",
             yaxis_title="Strike",
             zaxis=dict(title="Implied vol" if is_vol else label, tickformat=".0%" if is_vol else None),
@@ -471,6 +511,74 @@ def residuals(df: pd.DataFrame, fitted: pd.DataFrame) -> pd.DataFrame:
     return smiles.sort_values("spreads", key=abs, ascending=False, na_position="last")
 
 
+def surface_pick(df: pd.DataFrame, strike_range: float, expiry, strike) -> tuple[int, float]:
+    """A clicked surface point as (maturity slider index, strike picker value): the nearest expiry of df, which the
+    slider indexes, and the nearest strike within the range listed on that expiry (any expiry if none is), so the
+    smile has a quote there. The fitted surface's grid strikes aren't listed ones."""
+    dates = expiries(df)
+    picked = pd.Timestamp(expiry).date()
+    index = min(range(len(dates)), key=lambda i: abs(dates[i] - picked))
+    near = in_range(df, strike_range)
+    strikes = near[near.maturity == dates[index]].strike.unique()
+    strikes = strikes if len(strikes) else near.strike.unique()
+    return index, float(min(strikes, key=lambda k: abs(k - strike)))
+
+
+def default_strike(df: pd.DataFrame) -> float:
+    """The strike nearest spot among those listed on the most expiries: odd strikes near spot (357.5) are often
+    weeklies only"""
+    listed = df.groupby("strike").maturity.nunique()
+    widest = listed[listed == listed.max()].index
+    return float(min(widest, key=lambda k: abs(k - df.spot.iloc[0])))
+
+
+def term_structure(df: pd.DataFrame, strike: float, fitted: pd.DataFrame) -> go.Figure:
+    """Implied vol against expiry at one strike: the out-of-the-money quote of each expiry listing the strike, with
+    bars from the bid vol to the ask vol, and the eSSVI fit at every fitted expiry. Moneyness drifts with the forward
+    from one expiry to the next."""
+    quotes = otm(df[df.strike == strike])
+    first = df.groupby("maturity")[["T", "forward"]].first()
+    first = first[first.index.isin(fitted.index)]
+    fit = fitted.loc[first.index]
+    fig = go.Figure()
+    for kind in ("Put", "Call"):
+        side = quotes[quotes.type == kind]
+        fig.add_scatter(
+            x=pd.to_datetime(side.maturity),
+            y=side.implied_vol,
+            mode="markers",
+            name=f"OTM {kind.lower()}",
+            marker=dict(color=PUT if kind == "Put" else CALL),
+            error_y=dict(
+                type="data",
+                symmetric=False,
+                array=(side.ask_vol - side.implied_vol).fillna(0),
+                arrayminus=(side.implied_vol - side.bid_vol).fillna(0),
+                thickness=1,
+                width=0,
+            ),
+            customdata=np.column_stack([side.bid_vol, side.ask_vol]),
+            hovertemplate="Expiry %{x|%d %b %y}<br>Implied vol %{y:.2%}<br>bid %{customdata[0]:.2%}, "
+            "ask %{customdata[1]:.2%}<extra></extra>",
+        )
+    fig.add_scatter(
+        x=pd.to_datetime(first.index),
+        y=ssvi.vol(np.log(strike / first.forward), first["T"], fit.theta, fit.rho, fit.psi),
+        mode="lines",
+        name="eSSVI fit",
+        line=dict(color=MUTED, width=2),
+        hovertemplate="Expiry %{x|%d %b %y}<br>eSSVI vol %{y:.2%}<extra></extra>",
+    )
+    fig.update_layout(
+        title=f"Term structure at strike {strike:g}",
+        margin=MARGIN | dict(b=90),
+        xaxis_title="Expiry",
+        yaxis=dict(title="Implied vol", tickformat=".0%"),
+        legend=dict(orientation="h", x=0, y=-0.22, yanchor="top"),
+    )
+    return fig
+
+
 def total_variance(df: pd.DataFrame, source: str, fitted: pd.DataFrame | None = None) -> go.Figure:
     """Total variance vol^2 T against log-moneyness, one line per expiry, from market vols or the eSSVI fit. Without
     calendar arbitrage a later expiry's line never dips below an earlier one's; red crosses mark calendar arbitrage
@@ -498,7 +606,7 @@ def total_variance(df: pd.DataFrame, source: str, fitted: pd.DataFrame | None = 
             showlegend=False,
             hovertemplate=f"Expiry {maturity:%d %b %y}<br>k %{{x:.3f}}<br>σ²T %{{y:.4f}}<extra></extra>",
         )
-    bad = arbitrage.calendars(df[(df.bid > 0) & (df.ask > 0)])
+    bad = arbitrage.calendars(df[(df.bid > 0) & (df.ask > 0) & df.usable])
     fig.add_scatter(
         x=bad.k,
         y=bad.w,
@@ -511,7 +619,7 @@ def total_variance(df: pd.DataFrame, source: str, fitted: pd.DataFrame | None = 
     )
     source_label = "eSSVI fit" if fitted is not None else "market"
     fig.update_layout(
-        title=f"Total variance σ²T by log-moneyness, {source_label} (darker = later expiry)",
+        title=f"Total variance σ²T, {source_label} (darker: later expiry)",
         margin=MARGIN,
         xaxis_title="Log-moneyness ln(K/F)",
         yaxis=dict(title="σ²T (log scale)", type="log"),  # spreads the short expiries bunched near 0
@@ -535,11 +643,19 @@ def empty(message: str = "") -> go.Figure:
     return fig
 
 
-def quote(ticker: str, **stats) -> list:
-    """The quote strip above the charts: ticker, then label/value pairs"""
-    return [html.Strong(ticker, className="ticker")] + [
-        html.Span([html.Small(label.replace("_", " ")), value], className="stat") for label, value in stats.items()
-    ]
+def quote(**stats) -> list:
+    """The quote figures in the masthead, label above value"""
+    return [html.Span([html.Small(label.replace("_", " ")), value], className="stat") for label, value in stats.items()]
+
+
+def field(label: str, control, control_id: str | None = None):
+    """A toolbar control with its label above"""
+    return html.Div([html.Label(label, htmlFor=control_id), control], className="field")
+
+
+def segmented(component_id: str, options: list, value: str):
+    """Radio items styled as a segmented control (assets/style.css)"""
+    return dcc.RadioItems(options, value, id=component_id, inline=True)
 
 
 def dropdown(component_id, options, value):
@@ -550,157 +666,572 @@ def card(*children, class_name="card"):
     return html.Div(className=class_name, children=list(children))
 
 
+def leg_columns(dates: list) -> list:
+    """Columns of the legs table: what to trade is editable, what it costs is computed"""
+    choice = {"editable": True, "cellClass": "editable", "cellEditor": "agSelectCellEditor"}
+    number = {"editable": True, "cellClass": "editable", "cellEditor": "agNumberCellEditor"}
+    return [
+        {"field": "side", "headerName": "Side", "cellEditorParams": {"values": ["Buy", "Sell"]}} | choice,
+        {"field": "quantity", "headerName": "Quantity"} | number,
+        {"field": "instrument", "headerName": "Instrument", "cellEditorParams": {"values": ["Call", "Put", "Stock"]}}
+        | choice,
+        {"field": "expiry", "headerName": "Expiry", "cellEditorParams": {"values": [str(d) for d in dates]}} | choice,
+        {"field": "strike", "headerName": "Strike"} | number,
+        {"field": "fill", "headerName": "Fill (bid/ask)", "valueFormatter": DOLLARS},
+        {"field": "mid", "headerName": "Mid", "valueFormatter": DOLLARS},
+        {"field": "vol", "headerName": "Implied vol", "valueFormatter": PERCENT},
+        {
+            "field": "position_delta",
+            "headerName": "Delta, shares",
+            "valueFormatter": {"function": "params.value == null ? '' : d3.format(',.1f')(params.value)"},
+        },
+    ]
+
+
+STRATEGY_TAB = html.Main(
+    className="results",
+    children=[
+        html.Div(
+            className="grid strategy-row",
+            children=[
+                card(
+                    html.Div(
+                        className="card-tools",
+                        children=[
+                            html.Label("Preset", htmlFor="preset"),
+                            html.Div(dropdown("preset", list(strategy.PRESETS), "Covered call"), className="preset"),
+                            html.Label("Expiry", htmlFor="preset-expiry"),
+                            html.Div(dropdown("preset-expiry", [], None), className="expiry"),
+                            html.Label("Apart", htmlFor="width"),
+                            html.Div(
+                                dropdown("width", [{"label": f"{w:.1%} of spot", "value": w} for w in WIDTHS], 0.05),
+                                className="width",
+                            ),
+                            html.Button("Add leg", id="add-leg", className="secondary"),
+                            html.Button("Remove ticked", id="remove-legs", className="secondary"),
+                        ],
+                    ),
+                    html.P(
+                        "Click a side, quantity, instrument, expiry or strike to change it; strikes snap to listed ones. "
+                        "Quantity is contracts of 100 shares, or shares for the stock.",
+                        className="hint",
+                    ),
+                    dag.AgGrid(
+                        id="legs",
+                        rowData=[],
+                        columnDefs=leg_columns([]),
+                        getRowId="params.data.id",
+                        defaultColDef={"flex": 1, "sortable": False},
+                        dashGridOptions={
+                            "theme": GRID_THEME,
+                            "domLayout": "autoHeight",
+                            "rowSelection": {"mode": "multiRow"},
+                            "singleClickEdit": True,
+                            "stopEditingWhenCellsLoseFocus": True,
+                        },
+                    ),
+                ),
+                card(
+                    html.Div(
+                        className="card-tools",
+                        children=[
+                            html.H2("Position", className="card-title"),
+                            html.Label("valued at", htmlFor="horizon"),
+                            html.Div(dropdown("horizon", [], None), className="expiry"),
+                            segmented("strategy-vols", VOL_MODES, "own"),
+                        ],
+                    ),
+                    html.Div(id="position"),
+                ),
+            ],
+        ),
+        html.Div(
+            className="grid",
+            children=[
+                card(dcc.Graph(id="payoff", className="chart")),
+                card(dcc.Graph(id="scenarios", className="chart")),
+            ],
+        ),
+    ],
+)
+
+
+PARITY_TAB = html.Main(
+    className="results",
+    children=[
+        html.Div(
+            className="grid",
+            children=[
+                card(dcc.Graph(id="parity-chart", className="chart")),
+                card(
+                    html.H2("Implied forward and yield by expiry", className="card-title"),
+                    html.P(
+                        "From put-call parity on the strikes nearest spot. The range is what bid/ask allows: outside "
+                        "it a conversion or reversal would pay. Divs: the PV of dividends the forward implies. Borrow and "
+                        "other: implied yield - trailing dividend yield.",
+                        className="hint",
+                    ),
+                    dag.AgGrid(
+                        id="parity-table",
+                        rowData=[],
+                        columnDefs=[
+                            {"field": "maturity", "headerName": "Expiry", "minWidth": 110},
+                            {"field": "forward", "headerName": "Forward", "valueFormatter": DOLLARS},
+                            {"field": "implied_yield", "headerName": "Implied", "valueFormatter": PERCENT},
+                            {"field": "low_yield", "headerName": "Low", "valueFormatter": PERCENT},
+                            {"field": "high_yield", "headerName": "High", "valueFormatter": PERCENT},
+                            {"field": "dividends", "headerName": "Divs, $", "valueFormatter": DOLLARS},
+                            {"field": "borrow", "headerName": "Borrow", "valueFormatter": PERCENT},
+                            {"field": "pairs", "headerName": "Pairs"},
+                            {"field": "stale", "headerName": "Stale"},
+                        ],
+                        defaultColDef={"flex": 1, "sortable": True},
+                        dashGridOptions={"theme": GRID_THEME, "domLayout": "autoHeight"},
+                    ),
+                ),
+            ],
+        ),
+        card(
+            html.H2(id="stale-title", className="card-title"),
+            dag.AgGrid(
+                id="stale-pairs",
+                rowData=[],
+                columnDefs=[
+                    {"field": "maturity", "headerName": "Expiry"},
+                    {"field": "strike", "headerName": "Strike"},
+                    {"field": "bid", "headerName": "Call bid", "valueFormatter": DOLLARS},
+                    {"field": "ask", "headerName": "Call ask", "valueFormatter": DOLLARS},
+                    {"field": "bid_put", "headerName": "Put bid", "valueFormatter": DOLLARS},
+                    {"field": "ask_put", "headerName": "Put ask", "valueFormatter": DOLLARS},
+                    {"field": "low", "headerName": "Forward from, at bid/ask", "valueFormatter": DOLLARS},
+                    {"field": "high", "headerName": "to", "valueFormatter": DOLLARS},
+                    {"field": "forward", "headerName": "Expiry forward", "valueFormatter": DOLLARS},
+                    {"field": "miss", "headerName": "Miss", "sort": "desc", "valueFormatter": PERCENT},
+                ],
+                defaultColDef={"flex": 1, "sortable": True, "filter": True},
+                dashGridOptions={
+                    "theme": GRID_THEME,
+                    "domLayout": "autoHeight",
+                    "pagination": True,
+                    "paginationPageSize": 10,
+                },
+            ),
+        ),
+    ],
+)
+
+
+def parity_by_expiry(df: pd.DataFrame, dividend_yield: float, band=0.05) -> pd.DataFrame:
+    """Per expiry: the implied forward and yield, the yield range the bid/ask of the live pairs within band of spot
+    allow (the tightest of their forward ranges), the PV of dividends it implies, borrow and other (implied yield -
+    trailing dividend yield), and how many pairs were checked and found stale"""
+    pairs = parity_pairs(df)
+    stale = pairs.miss > PARITY_TOL
+    strikes = pairs.index.get_level_values("strike")
+    live = pairs[~stale & ((strikes / pairs.spot - 1).abs() <= band)].groupby(level="maturity")
+    first = df.groupby("maturity")[["spot", "r", "T", "forward", "div_yield"]].first()
+    low, high = live.low.max().reindex(first.index), live.high.min().reindex(first.index)
+
+    def to_yield(forward):
+        return first.r - np.log(forward / first.spot) / first["T"]
+
+    return pd.DataFrame(
+        {
+            "forward": first.forward,
+            "implied_yield": first.div_yield,
+            "low_yield": to_yield(high),
+            "high_yield": to_yield(low),
+            "dividends": first.spot - first.forward * np.exp(-first.r * first["T"]),
+            "borrow": first.div_yield - dividend_yield,
+            "pairs": pairs.groupby(level="maturity").size().reindex(first.index).fillna(0).astype(int),
+            "stale": stale.groupby(level="maturity").sum().reindex(first.index).fillna(0).astype(int),
+        }
+    )
+
+
+def parity_chart(table: pd.DataFrame, dividend_yield: float) -> go.Figure:
+    """Implied yield per expiry with its bid/ask range, against the trailing dividend yield"""
+    x = pd.to_datetime(table.index)
+    fig = go.Figure()
+    if pd.notna(dividend_yield):
+        fig.add_hline(
+            y=dividend_yield,
+            line=dict(color=CALL, width=1.5, dash="dash"),
+            annotation_text=f"trailing dividend yield {dividend_yield:.2%}",
+            annotation_position="bottom right",
+        )
+    fig.add_scatter(
+        x=x,
+        y=table.implied_yield,
+        mode="lines+markers",
+        name="Implied yield",
+        line=dict(color=PUT),
+        error_y=dict(
+            type="data",
+            symmetric=False,
+            array=(table.high_yield - table.implied_yield).clip(lower=0).fillna(0),
+            arrayminus=(table.implied_yield - table.low_yield).clip(lower=0).fillna(0),
+            thickness=1,
+            width=0,
+        ),
+        hovertemplate="Expiry %{x|%d %b %y}<br>Implied yield %{y:.2%}<extra></extra>",
+    )
+    # front expiries, a session or two away, turn a cent of forward into tens of percent: keep the axis on the rest
+    levels = pd.concat([table.implied_yield, pd.Series([dividend_yield])]).dropna()
+    low, high = levels.quantile(0.1), levels.quantile(0.9)
+    pad = max(high - low, 0.01)
+    fig.update_layout(
+        title=dict(
+            text="Implied yield (dividends + borrow) by expiry",
+            subtitle=dict(
+                text="Bars: the range bid/ask allows near spot. Axis cut to the middle 80%: front expiries swing"
+            ),
+        ),
+        yaxis_range=[low - pad, high + pad],
+        margin=MARGIN | dict(t=70),
+        xaxis_title="Expiry",
+        yaxis=dict(title="Continuous yield", tickformat=".1%"),
+        showlegend=False,
+    )
+    return fig
+
+
+def strategy_spots(priced: pd.DataFrame, spot: float, points=401) -> np.ndarray:
+    """Spots to chart: from 15% below the lowest of spot and the strikes to 15% above the highest"""
+    levels = [spot, *priced.strike.dropna()]
+    return np.linspace(min(levels) * 0.85, max(levels) * 1.15, points)
+
+
+def payoff_chart(priced: pd.DataFrame, spot: float, horizon: date, elapsed: float, fitted=None) -> go.Figure:
+    """P&L against spot, today and at the horizon, from the cost to open at bid/ask"""
+    spots = strategy_spots(priced, spot)
+    entry = strategy.cost(priced)
+    fig = go.Figure()
+    fig.add_hline(y=0, line=dict(color=RULE, width=1))
+    fig.add_vline(x=spot, line=dict(color=MUTED, width=1, dash="dot"), annotation_text="spot")
+    fig.add_scatter(
+        x=spots, y=strategy.value(priced, spots, fitted=fitted) - entry, name="Today", line=dict(color=PUT, width=1.5)
+    )
+    fig.add_scatter(
+        x=spots,
+        y=strategy.value(priced, spots, elapsed, fitted=fitted) - entry,
+        name=f"At {horizon:%d %b %y}",
+        line=dict(color=INK, width=2.5),
+    )
+    fig.update_traces(hovertemplate="Spot %{x:,.2f}<br>P&L $%{y:,.0f}<extra></extra>")
+    fig.update_layout(
+        title=dict(
+            text="P&L, $",
+            subtitle=dict(
+                text="Options repriced at their own vols (sticky strike)"
+                if fitted is None
+                else "Options repriced on the eSSVI fit at their moneyness; legs outside the fit at their own vol"
+            ),
+        ),
+        margin=MARGIN | dict(b=90, t=70),
+        xaxis_title="Spot",
+        yaxis=dict(tickformat=",.0f"),
+        legend=dict(orientation="h", x=0, y=-0.22, yanchor="top"),
+    )
+    return fig
+
+
+def scenario_chart(priced: pd.DataFrame, spot: float, horizon: date, elapsed: float, fitted=None) -> go.Figure:
+    """P&L at the horizon for spot moves against parallel vol shifts"""
+    moves, shifts = np.arange(-20, 21, 5), np.arange(-10, 11, 5)
+    entry = strategy.cost(priced)
+    z = [strategy.value(priced, spot * (1 + moves / 100), elapsed, shift / 100, fitted) - entry for shift in shifts]
+    fig = go.Figure(
+        go.Heatmap(
+            x=[f"{m:+d}%" for m in moves],
+            y=[f"{v:+d} pts" for v in shifts],
+            z=z,
+            zmid=0,
+            colorscale="RdBu",
+            texttemplate="%{z:,.0f}",
+            colorbar=dict(title="P&L, $"),
+            hovertemplate="Spot %{x}, vol %{y}<br>P&L $%{z:,.0f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"P&L at {horizon:%d %b %y}: spot move against vol shift", margin=MARGIN, xaxis_title="Spot move"
+    )
+    return fig
+
+
+def money(value: float | None, decimals=0) -> str:
+    """-$1,234 rather than $-1,234"""
+    return "unlimited" if value is None else f"{'-' if value < 0 else ''}${abs(value):,.{decimals}f}"
+
+
+def position_summary(priced: pd.DataFrame, chain: pd.DataFrame, horizon: date, elapsed: float, fitted=None) -> html.Dl:
+    """Cost to open, greeks and, at the horizon, max profit and loss, breakevens and a rough chance of profit"""
+    spot = chain.spot.iloc[0]
+    entry, mid = strategy.cost(priced), strategy.cost(priced, "mid")
+    spots = np.linspace(spot * 1e-3, spot * 4, 4001)
+    pnl = strategy.value(priced, spots, elapsed, fitted=fitted) - entry
+    stats = strategy.payoff_stats(spots, pnl)
+    at = chain[chain.maturity == horizon]
+    vol = atm_vol(chain).get(horizon, np.nan)
+    vol = vol if pd.notna(vol) else priced.vol.median()
+    drift = float((at.r - at.div_yield).iloc[0]) if len(at) else 0.0
+    chance = strategy.chance_of_profit(spots, pnl, spot, elapsed, vol, drift)
+    greeks = strategy.greeks(priced)
+    rows = {
+        "Cost to open, at bid/ask": f"{'pay' if entry >= 0 else 'receive'} ${abs(entry):,.2f}",
+        "At mid": f"{'pay' if mid >= 0 else 'receive'} ${abs(mid):,.2f}; the spread costs {money(entry - mid, 2)}",
+        **(
+            {}
+            if fitted is None
+            else {"eSSVI value - mid": money(strategy.value(priced, [spot], fitted=fitted)[0] - mid, 2)}
+        ),
+        "Delta": f"{greeks['delta']:,.1f} shares",
+        "Gamma": f"{greeks['gamma']:,.2f} shares per $1",
+        "Vega": f"{money(greeks['vega'], 2)} per vol point",
+        "Theta": f"{money(greeks['theta'], 2)} per trading day",
+        f"Max profit at {horizon:%d %b}": money(stats["max_profit"]),
+        f"Max loss at {horizon:%d %b}": money(stats["max_loss"]),
+        "Breakevens": ", ".join(f"{b:,.2f}" for b in stats["breakevens"]) or "none",
+        "Chance of profit": f"{chance:.0%} (rough: lognormal, ATM vol {vol:.0%})",
+    }
+    return html.Dl([part for k, v in rows.items() for part in (html.Dt(k), html.Dd(v))], className="stats")
+
+
 app = Dash(__name__, title="Listed options dashboard")
 app.layout = html.Div(
     className="page",
     children=[
         dcc.Store(id="loaded"),
-        html.Div(
-            className="controls",
+        html.Header(
+            className="masthead",
             children=[
-                html.H1("Listed options"),
-                html.Label("Underlying", htmlFor="ticker"),
                 html.Div(
-                    className="row",
+                    className="masthead-top",
                     children=[
+                        html.H1("Listed options"),
                         html.Div(
                             dropdown(
                                 "ticker",
                                 [{"label": f"{t} · {name}", "value": t} for t, name in TICKERS.items()],
                                 "TSLA",
                             ),
-                            className="grow",
+                            className="ticker-picker",
                         ),
+                        html.Div(id="status", className="quote", role="status"),
                         html.Button("Reload", id="load", title="Fetch fresh quotes instead of the 15-minute cache"),
                     ],
                 ),
-                dcc.RadioItems(["Call", "Put"], "Call", id="type", inline=True),
-                html.Label("Surface field", htmlFor="field"),
-                dropdown(
-                    "field",
-                    [{"label": to_title(f), "value": f} for f in FIELDS] + [{"label": ESSVI, "value": "essvi_vol"}],
-                    "implied_vol",
+                html.Div(
+                    className="toolbar",
+                    children=[
+                        field("Calls or puts (surface and chain)", segmented("type", ["Call", "Put"], "Call")),
+                        field(
+                            "Surface",
+                            dropdown(
+                                "field",
+                                [{"label": to_title(f), "value": f} for f in FIELDS]
+                                + [{"label": ESSVI, "value": "essvi_vol"}],
+                                "implied_vol",
+                            ),
+                            "field",
+                        ),
+                        field(
+                            "Strike range around spot",
+                            dropdown("range", [{"label": f"± {p}%", "value": p} for p in (5, 10, 15, 25, 50)], 15),
+                            "range",
+                        ),
+                        field(
+                            "Max maturity",
+                            dropdown(
+                                "months", [{"label": f"{m}M", "value": m} for m in (1, 2, 3, 6, 9, 12, 24, 36)], 6
+                            ),
+                            "months",
+                        ),
+                    ],
                 ),
-                html.Label("Strike range around spot", htmlFor="range"),
-                dropdown("range", [{"label": f"± {p}%", "value": p} for p in (5, 10, 15, 25, 50)], 15),
-                html.Label("Max maturity", htmlFor="months"),
-                dropdown("months", [{"label": f"{m}M", "value": m} for m in (1, 2, 3, 6, 9, 12, 24, 36)], 6),
             ],
         ),
-        html.Div(
-            className="results",
+        dcc.Tabs(
+            className="tabs",
+            parent_className="tabs-bar",
             children=[
-                html.Div(id="status", className="quote", role="status"),
-                html.Div(
-                    className="grid",
-                    children=[
-                        card(dcc.Loading(dcc.Graph(id="surface", className="chart", config={"scrollZoom": True}))),
-                        card(
-                            dcc.RadioItems(
-                                [{"label": "By delta", "value": "delta"}, {"label": "By strike", "value": "strike"}],
-                                "delta",
-                                id="heatmap-axis",
-                                inline=True,
+                dcc.Tab(
+                    label="Vol surface",
+                    className="tab",
+                    selected_className="tab--selected",
+                    children=html.Main(
+                        className="results",
+                        children=[
+                            html.Div(
+                                className="grid surface-row",
+                                children=[
+                                    card(
+                                        dcc.Loading(
+                                            dcc.Graph(id="surface", className="chart", config={"scrollZoom": True})
+                                        )
+                                    ),
+                                    card(
+                                        html.Div(
+                                            className="card-tools",
+                                            children=[
+                                                segmented(
+                                                    "heatmap-axis",
+                                                    [
+                                                        {"label": "By delta", "value": "delta"},
+                                                        {"label": "By strike", "value": "strike"},
+                                                    ],
+                                                    "delta",
+                                                ),
+                                                segmented("heatmap-source", SOURCES, "market"),
+                                            ],
+                                        ),
+                                        dcc.Graph(id="heatmap", className="chart"),
+                                    ),
+                                ],
                             ),
-                            dcc.RadioItems(
-                                [{"label": "Market", "value": "market"}, {"label": "eSSVI fit", "value": "fit"}],
-                                "market",
-                                id="heatmap-source",
-                                inline=True,
+                            html.Div(
+                                className="grid",
+                                children=[
+                                    card(
+                                        dcc.Graph(id="smile", className="chart"),
+                                        html.Label("Maturity", htmlFor="maturity"),
+                                        dcc.Slider(
+                                            0,
+                                            0,
+                                            1,
+                                            value=0,
+                                            id="maturity",
+                                            marks={},
+                                            included=False,
+                                            allow_direct_input=False,
+                                        ),
+                                    ),
+                                    card(
+                                        html.Div(
+                                            className="card-tools",
+                                            children=[
+                                                html.Label("Strike", htmlFor="strike"),
+                                                html.Div(
+                                                    dcc.Dropdown([], None, id="strike", clearable=False),
+                                                    className="strike",
+                                                ),
+                                            ],
+                                        ),
+                                        dcc.Graph(id="term-structure", className="chart"),
+                                    ),
+                                    card(
+                                        html.Div(
+                                            segmented("variance-source", SOURCES, "market"), className="card-tools"
+                                        ),
+                                        dcc.Graph(id="total-variance", className="chart"),
+                                    ),
+                                ],
                             ),
-                            dcc.Graph(id="heatmap", className="chart"),
-                        ),
-                    ],
-                ),
-                html.Div(
-                    className="grid",
-                    children=[
-                        card(
-                            dcc.Graph(id="smile", className="chart"),
-                            html.Label("Maturity", htmlFor="maturity"),
-                            dcc.Slider(
-                                0, 0, 1, value=0, id="maturity", marks={}, included=False, allow_direct_input=False
+                            html.Div(
+                                className="grid tables-row",
+                                children=[
+                                    card(
+                                        html.H2("Quotes furthest from the eSSVI fit", className="card-title"),
+                                        dag.AgGrid(
+                                            id="residuals",
+                                            rowData=[],
+                                            columnDefs=[
+                                                {"field": "maturity", "headerName": "Expiry"},
+                                                {"field": "type", "headerName": "Type"},
+                                                {"field": "strike", "headerName": "Strike"},
+                                                {
+                                                    "field": "implied_vol",
+                                                    "headerName": "Market vol",
+                                                    "valueFormatter": PERCENT,
+                                                },
+                                                {
+                                                    "field": "fit_vol",
+                                                    "headerName": "Fit vol",
+                                                    "valueFormatter": PERCENT,
+                                                },
+                                                {
+                                                    "field": "error",
+                                                    "headerName": "Fit - market",
+                                                    "valueFormatter": PERCENT,
+                                                },
+                                                {
+                                                    "field": "spreads",
+                                                    "headerName": "In half-spreads",
+                                                    "valueFormatter": {
+                                                        "function": "params.value == null ? '' : d3.format('+.1f')(params.value)"
+                                                    },
+                                                },
+                                            ],
+                                            defaultColDef={"sortable": True, "filter": True, "flex": 1},
+                                            dashGridOptions={
+                                                "theme": GRID_THEME,
+                                                "pagination": True,
+                                                "paginationPageSize": 10,
+                                                "domLayout": "autoHeight",
+                                            },
+                                        ),
+                                    ),
+                                    card(
+                                        html.H2(id="arbitrage-title", className="card-title"),
+                                        dag.AgGrid(
+                                            id="arbitrage",
+                                            rowData=[],
+                                            columnDefs=[
+                                                {"field": "check", "headerName": "Check"},
+                                                {"field": "maturity", "headerName": "Expiry"},
+                                                {"field": "strikes", "headerName": "Strikes"},
+                                                {
+                                                    "field": "dollars",
+                                                    "headerName": "Profit, $ per contract",
+                                                    "filter": "agNumberColumnFilter",
+                                                    "sort": "desc",
+                                                    "valueFormatter": {"function": "d3.format(',.2f')(params.value)"},
+                                                },
+                                                {"field": "trade", "headerName": "Trade", "flex": 3},
+                                            ],
+                                            defaultColDef={"sortable": True, "filter": True, "flex": 1},
+                                            dashGridOptions={
+                                                "theme": GRID_THEME,
+                                                "pagination": True,
+                                                "paginationPageSize": 10,
+                                                "domLayout": "autoHeight",
+                                            },
+                                        ),
+                                    ),
+                                ],
                             ),
-                        ),
-                        card(
-                            dcc.RadioItems(
-                                [{"label": "Market", "value": "market"}, {"label": "eSSVI fit", "value": "fit"}],
-                                "market",
-                                id="variance-source",
-                                inline=True,
+                            card(
+                                dag.AgGrid(
+                                    id="table",
+                                    rowData=[],
+                                    columnDefs=[
+                                        {"field": c, "headerName": to_title(c)}
+                                        | ({} if c in ("name", "maturity") else {"filter": "agNumberColumnFilter"})
+                                        | (
+                                            {
+                                                "valueFormatter": {
+                                                    "function": f"params.value == null ? '' : d3.format('{TABLE_FORMATS[c]}')(params.value)"
+                                                }
+                                            }
+                                            if c in TABLE_FORMATS
+                                            else {}
+                                        )
+                                        for c in COLUMNS
+                                    ],
+                                    defaultColDef={"sortable": True, "filter": True, "floatingFilter": True, "flex": 1},
+                                    dashGridOptions={
+                                        "theme": GRID_THEME,
+                                        "pagination": True,
+                                        "paginationPageSize": 20,
+                                        "domLayout": "autoHeight",
+                                    },
+                                )
                             ),
-                            dcc.Graph(id="total-variance", className="chart"),
-                        ),
-                    ],
-                ),
-                card(
-                    html.H2("Quotes furthest from the eSSVI fit", className="card-title"),
-                    dag.AgGrid(
-                        id="residuals",
-                        rowData=[],
-                        columnDefs=[
-                            {"field": "maturity", "headerName": "Expiry"},
-                            {"field": "type", "headerName": "Type"},
-                            {"field": "strike", "headerName": "Strike"},
-                            {"field": "implied_vol", "headerName": "Market vol", "valueFormatter": PERCENT},
-                            {"field": "fit_vol", "headerName": "Fit vol", "valueFormatter": PERCENT},
-                            {"field": "error", "headerName": "Fit - market", "valueFormatter": PERCENT},
-                            {
-                                "field": "spreads",
-                                "headerName": "In half-spreads",
-                                "valueFormatter": {
-                                    "function": "params.value == null ? '' : d3.format('+.1f')(params.value)"
-                                },
-                            },
                         ],
-                        defaultColDef={"sortable": True, "filter": True, "flex": 1},
-                        dashGridOptions={"pagination": True, "paginationPageSize": 10, "domLayout": "autoHeight"},
                     ),
                 ),
-                card(
-                    html.H2(id="arbitrage-title", className="card-title"),
-                    dag.AgGrid(
-                        id="arbitrage",
-                        rowData=[],
-                        columnDefs=[
-                            {"field": "check", "headerName": "Check"},
-                            {"field": "maturity", "headerName": "Expiry"},
-                            {"field": "strikes", "headerName": "Strikes"},
-                            {
-                                "field": "dollars",
-                                "headerName": "Profit, $ per contract",
-                                "filter": "agNumberColumnFilter",
-                                "sort": "desc",
-                                "valueFormatter": {"function": "d3.format(',.2f')(params.value)"},
-                            },
-                            {"field": "trade", "headerName": "Trade", "flex": 3},
-                        ],
-                        defaultColDef={"sortable": True, "filter": True, "flex": 1},
-                        dashGridOptions={"pagination": True, "paginationPageSize": 10, "domLayout": "autoHeight"},
-                    ),
-                ),
-                card(
-                    dag.AgGrid(
-                        id="table",
-                        rowData=[],
-                        columnDefs=[
-                            {"field": c, "headerName": to_title(c)}
-                            | ({} if c in ("name", "maturity") else {"filter": "agNumberColumnFilter"})
-                            | (
-                                {
-                                    "valueFormatter": {
-                                        "function": f"params.value == null ? '' : d3.format('{TABLE_FORMATS[c]}')(params.value)"
-                                    }
-                                }
-                                if c in TABLE_FORMATS
-                                else {}
-                            )
-                            for c in COLUMNS
-                        ],
-                        defaultColDef={"sortable": True, "filter": True, "floatingFilter": True, "flex": 1},
-                        dashGridOptions={"pagination": True, "paginationPageSize": 20, "domLayout": "autoHeight"},
-                    )
-                ),
+                dcc.Tab(label="Strategy", className="tab", selected_className="tab--selected", children=STRATEGY_TAB),
+                dcc.Tab(label="Parity", className="tab", selected_className="tab--selected", children=PARITY_TAB),
             ],
         ),
     ],
@@ -736,7 +1267,6 @@ def update(_clicks, ticker, option_type, field, strike_range, months, maturity_i
     view = select(df, option_type, strike_range)
     atm = atm_vol(df).dropna()
     status = quote(
-        ticker,
         spot=f"{df.spot.iloc[0]:.2f}",
         rate=f"{df.r.iloc[0]:.2%}",
         front_ATM_vol=f"{atm.iloc[0]:.1%}" if len(atm) else "n/a",
@@ -822,6 +1352,167 @@ def update_residuals(loaded):
     found = residuals(df, fit_for(loaded["ticker"], loaded["months"], loaded["range"]))
     columns = ["maturity", "type", "strike", "implied_vol", "fit_vol", "error", "spreads"]
     return found[columns].head(200).astype({"maturity": str}).to_dict("records")
+
+
+@app.callback(
+    Output("strike", "options"),
+    Output("strike", "value"),
+    Input("loaded", "data"),
+    State("strike", "value"),
+)
+def update_strikes(loaded, strike):
+    """Strikes within the strike range with how many expiries list each; keeps the chosen one if still listed"""
+    if not loaded:
+        return [], None
+    df = in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"])
+    listed = df.groupby("strike").maturity.nunique()
+    if strike not in listed.index:
+        strike = default_strike(df)
+    return [{"label": f"{k:g}  ({n} expiries)", "value": k} for k, n in listed.items()], strike
+
+
+@app.callback(Output("term-structure", "figure"), Input("strike", "value"), Input("loaded", "data"))
+def update_term_structure(strike, loaded):
+    if not loaded or strike is None:
+        return empty("No data")
+    df = in_range(load_options(loaded["ticker"], loaded["months"]), loaded["range"])
+    return term_structure(df, strike, fit_for(loaded["ticker"], loaded["months"], loaded["range"]))
+
+
+@app.callback(
+    Output("maturity", "value", allow_duplicate=True),
+    Output("strike", "value", allow_duplicate=True),
+    Input("surface", "clickData"),
+    State("loaded", "data"),
+    prevent_initial_call=True,
+)
+def pick_from_surface(click, loaded):
+    if not click or not loaded:
+        return no_update, no_update
+    point = click["points"][0]
+    df = load_options(loaded["ticker"], loaded["months"])
+    return surface_pick(df, loaded["range"], point["x"], point["y"])
+
+
+@app.callback(
+    Output("preset-expiry", "options"),
+    Output("preset-expiry", "value"),
+    Output("legs", "columnDefs"),
+    Input("loaded", "data"),
+    State("preset-expiry", "value"),
+)
+def update_strategy_expiries(loaded, expiry):
+    """Expiries of the loaded chain; keeps the chosen one if still listed, else the one nearest a month out"""
+    if not loaded:
+        return [], None, leg_columns([])
+    dates = expiries(load_options(loaded["ticker"], loaded["months"]))
+    if expiry not in [str(d) for d in dates]:
+        expiry = str(min(dates, key=lambda d: abs((d - date.today()).days - 30)))
+    return [{"label": f"{d:%d %b %y}", "value": str(d)} for d in dates], expiry, leg_columns(dates)
+
+
+@app.callback(
+    Output("legs", "rowData"),
+    Input("preset", "value"),
+    Input("preset-expiry", "value"),
+    Input("width", "value"),
+    Input("add-leg", "n_clicks"),
+    Input("remove-legs", "n_clicks"),
+    Input("legs", "cellValueChanged"),
+    Input("loaded", "data"),
+    State("legs", "rowData"),
+    State("legs", "selectedRows"),
+)
+def update_legs(preset, expiry, width, _add, _remove, changed, loaded, rows, selected):
+    """A preset, its expiry or width (re)builds the legs; adding, removing or editing a leg reprices them as they are"""
+    if not loaded or expiry is None:
+        return []
+    chain = load_options(loaded["ticker"], loaded["months"])
+    if ctx.triggered_id in (None, "loaded", "preset", "preset-expiry", "width"):
+        return strategy.build(preset, chain, expiry, width)
+    legs = {row["id"]: row for row in rows or []}
+    if ctx.triggered_id == "add-leg":
+        legs[max(legs, default=-1) + 1] = dict(side="Buy", quantity=1, instrument="Call", expiry=expiry, strike=None)
+    elif ctx.triggered_id == "remove-legs":
+        for row in selected or []:
+            legs.pop(row["id"], None)
+    else:  # an edited cell
+        legs |= {change["data"]["id"]: change["data"] for change in changed or []}
+    return strategy.as_rows(strategy.price(list(legs.values()), chain)) if legs else []
+
+
+@app.callback(
+    Output("horizon", "options"),
+    Output("horizon", "value"),
+    Input("legs", "rowData"),
+    State("loaded", "data"),
+    State("horizon", "value"),
+)
+def update_horizons(rows, loaded, horizon):
+    """Expiries up to the first option leg's, the default: until then every leg is still alive"""
+    first = min((row["expiry"] for row in rows or [] if row.get("expiry")), default=None)
+    if not loaded or first is None:
+        return [], None
+    dates = [str(d) for d in expiries(load_options(loaded["ticker"], loaded["months"])) if str(d) <= first]
+    options = [{"label": f"{date.fromisoformat(d):%d %b %y}", "value": d} for d in dates]
+    return options, horizon if horizon in dates else first
+
+
+@app.callback(
+    Output("payoff", "figure"),
+    Output("position", "children"),
+    Output("scenarios", "figure"),
+    Input("legs", "rowData"),
+    Input("horizon", "value"),
+    Input("strategy-vols", "value"),
+    State("loaded", "data"),
+)
+def update_strategy_view(rows, horizon, vols, loaded):
+    if not loaded or not rows or horizon is None:
+        return empty("Pick a preset or add a leg"), "", empty()
+    chain = load_options(loaded["ticker"], loaded["months"])
+    priced = strategy.price(rows, chain)
+    horizon = date.fromisoformat(horizon)
+    elapsed = float(chain[chain.maturity == horizon]["T"].max())  # trading years until the horizon expiry
+    spot = chain.spot.iloc[0]
+    fitted = fit_for(loaded["ticker"], loaded["months"], loaded["range"]) if vols == "fit" else None
+    return (
+        payoff_chart(priced, spot, horizon, elapsed, fitted),
+        position_summary(priced, chain, horizon, elapsed, fitted),
+        scenario_chart(priced, spot, horizon, elapsed, fitted),
+    )
+
+
+@app.callback(
+    Output("parity-chart", "figure"),
+    Output("parity-table", "rowData"),
+    Output("stale-pairs", "rowData"),
+    Output("stale-title", "children"),
+    Input("loaded", "data"),
+)
+def update_parity(loaded):
+    if not loaded:
+        return empty("No data"), [], [], "Pairs dropped by the parity check"
+    ticker = loaded["ticker"]
+    df = in_range(load_options(ticker, loaded["months"]), loaded["range"])
+    try:
+        dividend_yield = Environment().get_div_yield(ticker)
+    except Exception:  # noqa: BLE001  (a missing dividend history only blanks one column)
+        dividend_yield = np.nan
+    table = parity_by_expiry(df, dividend_yield)
+    pairs = parity_pairs(df)
+    stale = pairs[pairs.miss > PARITY_TOL].reset_index()
+    title = (
+        f"Pairs dropped by the parity check: {len(stale)} of {len(pairs)}. Their bid/ask can't reach the expiry's "
+        f"forward within {PARITY_TOL:.2%}: one quote is stale, so neither is used by the fit or the arbitrage scan."
+    )
+    columns = ["maturity", "strike", "bid", "ask", "bid_put", "ask_put", "low", "high", "forward", "miss"]
+    return (
+        parity_chart(table, dividend_yield),
+        table.reset_index(names="maturity").astype({"maturity": str}).round(6).to_dict("records"),
+        stale[columns].astype({"maturity": str}).round(6).to_dict("records"),
+        title,
+    )
 
 
 if __name__ == "__main__":

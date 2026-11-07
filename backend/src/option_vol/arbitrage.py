@@ -12,7 +12,8 @@ bounds against the forward rely on the forward implied from put-call parity.
 Free quotes (Yahoo) are snapshots of each contract taken at different times, and deep in-the-money ones are often
 hours stale: on SPX and SPY they made most of the violations, worth thousands of dollars that no one can trade.
 So scan() only checks the live part of the chain: out-of-the-money options and strikes within LIVE_BAND of the
-forward, and boxes only within LIVE_BAND. Even there a violation is a quote to check, not a guaranteed trade."""
+forward, and boxes only within LIVE_BAND; and with a usable column (app.usable), only usable quotes, which leaves
+out the call/put pairs that break put-call parity. Even there a violation is a quote to check, not a sure trade."""
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,8 @@ LIVE_BAND = 0.02  # strikes within 2% of the forward count as live on both sides
 
 
 def scan(quotes: pd.DataFrame) -> pd.DataFrame:
-    quotes = quotes[(quotes.bid > 0) & (quotes.ask > 0)].sort_values(["maturity", "type", "strike"])
+    keep = (quotes.bid > 0) & (quotes.ask > 0) & (quotes.usable if "usable" in quotes else True)
+    quotes = quotes[keep].sort_values(["maturity", "type", "strike"])
     otm = ((quotes.type == "Put") & (quotes.strike < quotes.forward)) | (
         (quotes.type == "Call") & (quotes.strike >= quotes.forward)
     )

@@ -10,53 +10,107 @@
   src: url("fonts/IBMPlexSans-greek.woff2") format("woff2");
   unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
 }
+
 :root {
-  --paper: #f3f5f7; --surface: #fff; --ink: #18212e; --muted: #5d6878; --rule: #dce1e7;
-  --put: #2f6db5; --call: #c7870f; --error: #b3261e;
+  --paper: #eef1f4; --surface: #fff; --rule: #dce1e7;
+  --ink: #18212e; --ink-raised: #233044; --muted: #5d6878;
+  --on-ink: #eef2f7; --on-ink-muted: #9fabbb;
+  --put: #2f6db5; --call: #c7870f; --error: #b3261e; --error-on-ink: #ff9e94;
   --font: "IBM Plex Sans", system-ui, sans-serif;
+  --gutter: 24px;
   /* Dash 4 component theme */
   --Dash-Fill-Interactive-Strong: var(--put);
   --Dash-Text-Strong: var(--ink);
   --Dash-Stroke-Strong: var(--rule);
 }
+
 body { margin: 0; font-family: var(--font); font-variant-numeric: tabular-nums; background: var(--paper); color: var(--ink); }
-.page { display: flex; gap: 20px; padding: 20px; min-height: 100vh; box-sizing: border-box; }
-
-.controls {
-  flex: 0 0 248px; display: flex; flex-direction: column; gap: 6px; align-self: flex-start;
-  position: sticky; top: 20px;
-}
-.controls h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 14px; }
-.controls label { font-size: 0.8rem; font-weight: 500; color: var(--muted); margin-top: 10px; }
-.row { display: flex; gap: 8px; }
-.row .grow { flex: 1; min-width: 0; }
-
-button {
-  font: inherit; font-size: 0.85rem; font-weight: 500; padding: 0 14px; cursor: pointer;
-  color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
-}
-button:hover { border-color: var(--put); color: var(--put); }
 :focus-visible { outline: 2px solid var(--put); outline-offset: 2px; }
 
-.results { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+/* masthead: what to look at (ticker, quote) on top, how to look at it (controls) below; the only dark element */
+.masthead { background: var(--ink); color: var(--on-ink); }
+.masthead-top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 32px; padding: 14px var(--gutter); }
+.masthead h1 { margin: 0; font-size: 0.9rem; font-weight: 500; color: var(--on-ink-muted); white-space: nowrap; }
+.ticker-picker { width: 240px; font-size: 1.05rem; font-weight: 600; }
+.masthead .dash-dropdown { color: var(--ink); }  /* white fields on the ink bar: don't inherit its light text */
 
-/* quote strip: the one loud element, everything else stays quiet */
-.quote { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 32px; padding: 4px 4px 8px; border-bottom: 1px solid var(--rule); min-height: 2.6rem; }
-.quote .ticker { font-size: 2.2rem; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
-.quote .stat { display: flex; flex-direction: column; font-size: 1.1rem; font-weight: 500; }
-.quote .stat small { font-size: 0.75rem; font-weight: 400; color: var(--muted); }
+.quote { flex: 1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 32px; min-height: 2.4rem; }
+.quote .stat { display: flex; flex-direction: column; font-size: 1.15rem; font-weight: 500; line-height: 1.25; }
+.quote .stat small { font-size: 0.72rem; font-weight: 400; color: var(--on-ink-muted); }
 .quote .stat small::first-letter { text-transform: uppercase; }
-.quote .error { color: var(--error); font-size: 0.95rem; max-width: 80ch; }
+.quote .error { color: var(--error-on-ink); font-size: 0.95rem; max-width: 80ch; }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; }
-.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px; min-width: 0; }
-.chart { height: clamp(360px, 46vh, 560px); }
-
-.dash-ag-grid, .ag-theme-alpine { --ag-font-family: var(--font); --ag-header-background-color: var(--paper); --ag-border-color: var(--rule); }
-
-@media (max-width: 820px) {
-  .page { flex-direction: column; padding: 12px; }
-  .controls { position: static; flex-basis: auto; }
-  .grid { grid-template-columns: 1fr; }
+button {
+  font: inherit; font-size: 0.85rem; font-weight: 500; height: 34px; padding: 0 16px; cursor: pointer;
+  color: var(--on-ink); background: transparent; border: 1px solid var(--on-ink-muted); border-radius: 6px;
 }
-.card-title { font-size: 1rem; font-weight: 600; margin: 2px 0 10px; }
+button:hover { border-color: var(--on-ink); background: rgba(255, 255, 255, 0.06); }
+
+.toolbar {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 28px;
+  padding: 10px var(--gutter) 14px; background: var(--ink-raised);
+}
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 0.75rem; color: var(--on-ink-muted); }
+.field:has(#field) { width: 260px; }
+.field:has(#range), .field:has(#months) { width: 170px; }
+
+/* radio items as segmented controls */
+.dash-radioitems { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(93, 104, 120, 0.13); }
+.dash-radioitems .dash-options-list-option {
+  margin: 0; padding: 5px 14px; border-radius: 5px; cursor: pointer;
+  font-size: 0.85rem; font-weight: 500; color: var(--muted);
+}
+.dash-radioitems .dash-options-list-option-wrapper { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+.dash-radioitems .dash-options-list-option.selected { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(24, 33, 46, 0.18); }
+.dash-radioitems .dash-options-list-option:has(input:focus-visible) { outline: 2px solid var(--put); outline-offset: 1px; }
+.toolbar .dash-radioitems { background: rgba(255, 255, 255, 0.08); }
+.toolbar .dash-radioitems .dash-options-list-option { color: var(--on-ink-muted); }
+.toolbar .dash-radioitems .dash-options-list-option.selected { color: var(--ink); }
+
+/* results */
+.results { display: flex; flex-direction: column; gap: 16px; padding: 20px var(--gutter) 32px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; }
+/* the 3D surface needs less width than the delta heatmap beside it, whose cells are crowded */
+.surface-row { grid-template-columns: minmax(320px, 2fr) minmax(440px, 3fr); }
+.tables-row { grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); align-items: start; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.card-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.card-tools .strike { width: 190px; }
+.card-title { font-size: 1rem; font-weight: 600; margin: 2px 0 12px; }
+.chart { height: clamp(360px, 46vh, 560px); }
+#surface { height: calc(clamp(360px, 46vh, 560px) + 34px); }  /* + the heatmap card's toggle row */
+.card label { font-size: 0.8rem; font-weight: 500; color: var(--muted); }
+
+/* tabs: underlined labels on the paper, below the masthead */
+.tabs-bar { padding: 0 var(--gutter); background: var(--surface); border-bottom: 1px solid var(--rule); }
+.tabs-bar .tab, .tabs-bar .tab--selected {
+  border: 0 !important; background: transparent !important; padding: 12px 4px 10px !important; margin-right: 24px;
+  width: auto !important; flex: none !important; font-weight: 500; color: var(--muted);
+  border-bottom: 2px solid transparent !important;
+}
+.tabs-bar .tab--selected { color: var(--ink); border-bottom-color: var(--put) !important; }
+
+/* strategy */
+.strategy-row { grid-template-columns: minmax(560px, 2fr) minmax(360px, 1fr); align-items: start; }
+.strategy-row .card-title { margin: 0 auto 0 0; }
+#legs .ag-center-cols-viewport { min-height: 0 !important; }  /* autoHeight reserves 150px for an empty grid */
+.card-tools .preset { width: 200px; }
+.card-tools .expiry { width: 150px; }
+.card-tools .width { width: 150px; }
+.card button.secondary { color: var(--ink); border-color: var(--rule); }
+.card button.secondary:hover { border-color: var(--muted); background: var(--paper); }
+.hint { margin: 8px 0 10px; font-size: 0.8rem; color: var(--muted); }
+.editable { background: #f6f8fb; }
+.stats { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 12px 0 0; font-size: 0.85rem; }
+.stats dt { color: var(--muted); }
+.stats dd { margin: 0; font-weight: 500; }
+
+@media (max-width: 1180px) {
+  .surface-row, .tables-row, .strategy-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 820px) {
+  :root { --gutter: 12px; }
+  .grid { grid-template-columns: 1fr; }
+  .ticker-picker, .field:has(#field), .field:has(#range), .field:has(#months) { width: 100%; }
+}

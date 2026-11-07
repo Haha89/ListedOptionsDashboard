@@ -1,10 +1,14 @@
 """Dashboard data path: pricing a chain, filtering it and building the surface, with Yahoo replaced by a fake"""
 
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import ndtr
 
 import app
+from src.option_vol import strategy
 from src.option_vol.models import Call, Environment, Put
 from tests.test_pricing import make, market  # noqa: F401  (autouse fixture: spot 100, 5% rate)
 
@@ -17,6 +21,7 @@ def vol_of(strike):  # flat by default; tests swap it for a skew
 
 DIV_YIELD = 0.0  # tests swap it to check the implied yield
 STALE = set()  # (type, strike, days) quoted by a last trade 20% off instead of a two-sided quote
+OFF = set()  # (type, strike, days) with a two-sided quote 20% off: a stale snapshot that breaks put-call parity
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +37,7 @@ def fake_chain(monkeypatch):
             if (o.type, o.strike, round(o.T * 365)) in globals()["STALE"]:
                 o.price *= 1.2
             else:
+                o.price *= 1.2 if (o.type, o.strike, round(o.T * 365)) in globals()["OFF"] else 1
                 o.bid, o.ask = o.price * 0.99, o.price * 1.01
         return options
 
@@ -233,3 +239,119 @@ def test_residuals_and_bid_ask_bars():
     assert np.isnan(app.residuals(df, app.ssvi_fit(df)).spreads.iloc[-1])
     puts = app.smile(df, app.expiries(df)[0], 100.0).data[0]
     assert (np.asarray(puts.error_y.array) > 0).all() and (np.asarray(puts.error_y.arrayminus) > 0).all()
+
+
+def test_term_structure_at_a_strike(monkeypatch):
+    monkeypatch.setitem(globals(), "vol_of", lambda strike: 0.3 + 0.002 * (100 - strike))
+    df = app.load_options("TEST", 6)
+    puts, calls, fit = app.term_structure(df, 90.0, app.ssvi_fit(df)).data
+    assert len(puts.x) == 3 and len(calls.x) == 0  # 90 is below every forward: the put side, all 3 expiries
+    assert np.allclose(puts.y, 0.32)
+    assert len(fit.x) == 3 and np.abs(np.asarray(fit.y) - 0.32).max() < 0.01
+    options, strike = app.update_strikes({"ticker": "TEST", "months": 6, "range": 50}, None)
+    assert strike == 100.0 and len(options) == 11  # nearest spot by default; strikes 50..150
+    assert app.update_strikes({"ticker": "TEST", "months": 6, "range": 50}, 120.0)[1] == 120.0  # the choice is kept
+    weekly = df.iloc[[0]].assign(strike=100.5)  # an odd strike nearer spot, on one expiry only
+    assert app.default_strike(pd.concat([df, weekly])) == 100.0
+
+
+def test_a_surface_click_picks_the_nearest_expiry_and_listed_strike():
+    df = app.load_options("TEST", 6)
+    dates = app.expiries(df)
+    clicked = (dates[1] + timedelta(days=3)).isoformat() + " 00:00"  # a grid point between expiries
+    assert app.surface_pick(df, 50, clicked, 103.7) == (1, 100.0)
+    assert app.surface_pick(df, 15, dates[2].isoformat(), 140.0) == (2, 110.0)  # 140 is beyond the range
+    weekly = df[df.maturity == dates[0]].iloc[[0]].assign(strike=104.0)  # listed on the first expiry only
+    assert app.surface_pick(pd.concat([df, weekly]), 50, dates[1].isoformat(), 103.7) == (1, 100.0)
+    assert app.surface_pick(pd.concat([df, weekly]), 50, dates[0].isoformat(), 103.7) == (0, 104.0)
+    fig = app.surface(app.vol_view(df, 50), "implied_vol")
+    assert "Click" in fig.layout.title.subtitle.text
+
+
+def legs_of(preset, width=0.1):
+    chain = app.load_options("TEST", 6)
+    expiry = min(chain.maturity)
+    return strategy.price(strategy.build(preset, chain, expiry, width), chain)
+
+
+def test_strategy_legs_snap_and_fill_at_bid_ask():
+    priced = legs_of("Covered call")
+    stock, call = priced.iloc[0], priced.iloc[1]
+    assert (stock.units, stock.fill) == (100, 100.0)
+    assert (call.strike, call.units, call.instrument) == (110.0, -100, "Call")
+    assert call.fill == pytest.approx(call.mid * 0.99)  # sold at the bid
+    assert strategy.greeks(priced)["delta"] == pytest.approx(100 - 100 * call.delta)
+
+
+def test_strategy_today_is_worth_the_mids():
+    priced = legs_of("Iron condor")
+    assert strategy.value(priced, [100.0])[0] == pytest.approx(strategy.cost(priced, "mid"))
+
+
+def test_covered_call_at_expiry():
+    priced = legs_of("Covered call")
+    spots = np.linspace(0.1, 400, 4000)
+    pnl = strategy.value(priced, spots, priced["T"].max()) - strategy.cost(priced)
+    stats = strategy.payoff_stats(spots, pnl)
+    premium = priced.fill.iloc[1] * 100
+    assert stats["max_profit"] == pytest.approx(10 * 100 + premium)
+    assert stats["max_loss"] == pytest.approx(-(100 - 0.1) * 100 + premium, rel=1e-3)
+    assert stats["breakevens"] == [pytest.approx(100 - premium / 100, abs=0.01)]
+
+
+def test_straddle_profit_is_unlimited_and_conversion_is_flat():
+    straddle = legs_of("Straddle")
+    spots = np.linspace(1, 400, 4000)
+    expired = strategy.value(straddle, spots, straddle["T"].max()) - strategy.cost(straddle)
+    assert strategy.payoff_stats(spots, expired)["max_profit"] is None
+    conversion = legs_of("Conversion")
+    flat = strategy.value(conversion, spots, conversion["T"].max())
+    assert np.ptp(flat) == pytest.approx(0, abs=1e-6)  # stock + put - call pays the strike whatever the spot
+
+
+def test_calendar_takes_a_later_expiry_and_values_its_far_leg():
+    priced = legs_of("Call calendar")
+    near, far = priced.iloc[0], priced.iloc[1]
+    assert far.expiry > near.expiry and far.strike == near.strike
+    at_near = strategy.value(priced, [100.0], near["T"])[0]
+    assert at_near > 0  # the long far call still has time value
+
+
+def test_chance_of_profit_of_long_stock():
+    spots = np.linspace(1, 400, 8000)
+    chance = strategy.chance_of_profit(spots, spots - 100, 100, 1.0, 0.3, 0.0)
+    assert chance == pytest.approx(ndtr(-0.15), abs=2e-3)  # P(S_1 > S_0) = N(-vol/2) without drift
+
+
+def test_a_pair_off_parity_is_dropped_and_not_flagged_as_arbitrage(monkeypatch):
+    monkeypatch.setitem(globals(), "OFF", {("Call", 100, 30)})
+    df = app.load_options("TEST", 6)
+    front = df[df.maturity == df.maturity.min()]
+    dropped = front[~front.usable]
+    assert set(zip(dropped.type, dropped.strike)) == {("Call", 100.0), ("Put", 100.0)}
+    assert front.div_yield.iloc[0] == pytest.approx(0, abs=1e-3)
+    rows, _ = app.update_arbitrage({"ticker": "TEST", "months": 6, "range": 50})
+    assert not [r for r in rows if "100" in r["strikes"].split("/")]
+
+
+def test_parity_by_expiry(monkeypatch):
+    monkeypatch.setitem(globals(), "OFF", {("Call", 100, 30)})
+    df = app.load_options("TEST", 6)
+    table = app.parity_by_expiry(df, dividend_yield=0.01, band=0.15)  # 5% holds only the stale strike 100 here
+    assert table.implied_yield.to_numpy() == pytest.approx(0, abs=1e-3)
+    assert (table.low_yield <= table.implied_yield + 1e-9).all() and (
+        table.implied_yield <= table.high_yield + 1e-9
+    ).all()
+    assert table.dividends.to_numpy() == pytest.approx(0, abs=0.05)
+    assert table.borrow.to_numpy() == pytest.approx(-0.01, abs=1e-3)
+    assert table.stale.tolist() == [1, 0, 0] and (table.pairs == 11).all()
+    monkeypatch.setitem(Environment.div_yield, "TEST", 0.01)  # no Yahoo
+    _figure, _rows, stale, title = app.update_parity({"ticker": "TEST", "months": 6, "range": 50})
+    assert [(r["strike"], round(r["miss"], 2) > 0) for r in stale] == [(100.0, True)] and "1 of 33" in title
+
+
+def test_strategy_on_essvi_vols_matches_own_vols_on_a_flat_smile():
+    priced = legs_of("Iron condor")
+    fitted = app.fit_for("TEST", 6, 50)
+    own, fit = strategy.value(priced, [90.0, 100.0, 110.0]), strategy.value(priced, [90.0, 100.0, 110.0], fitted=fitted)
+    assert fit == pytest.approx(own, abs=0.5)  # $ on a position of 4 contracts
