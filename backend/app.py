@@ -937,15 +937,20 @@ def payoff_chart(priced: pd.DataFrame, spot: float, horizon: date, elapsed: floa
 
 
 def scenario_chart(priced: pd.DataFrame, spot: float, horizon: date, elapsed: float, fitted=None) -> go.Figure:
-    """P&L at the horizon for spot moves against parallel vol shifts"""
+    """P&L at the horizon for spot moves against parallel vol shifts; one row, by spot alone, when the vol shift
+    changes nothing (every option expired by then, or stock only)"""
     moves, shifts = np.arange(-20, 21, 5), np.arange(-10, 11, 5)
     entry = strategy.cost(priced)
-    z = [strategy.value(priced, spot * (1 + moves / 100), elapsed, shift / 100, fitted) - entry for shift in shifts]
+    z = np.array(
+        [strategy.value(priced, spot * (1 + moves / 100), elapsed, shift / 100, fitted) - entry for shift in shifts]
+    )
+    flat = np.allclose(z, z[shifts == 0], atol=0.5)  # within 50 cents
+    rows = ["any vol"] if flat else [f"{v:+d} pts" for v in shifts]
     fig = go.Figure(
         go.Heatmap(
             x=[f"{m:+d}%" for m in moves],
-            y=[f"{v:+d} pts" for v in shifts],
-            z=z,
+            y=rows,
+            z=z[shifts == 0] if flat else z,
             zmid=0,
             colorscale="RdBu",
             texttemplate="%{z:,.0f}",
@@ -953,9 +958,10 @@ def scenario_chart(priced: pd.DataFrame, spot: float, horizon: date, elapsed: fl
             hovertemplate="Spot %{x}, vol %{y}<br>P&L $%{z:,.0f}<extra></extra>",
         )
     )
-    fig.update_layout(
-        title=f"P&L at {horizon:%d %b %y}: spot move against vol shift", margin=MARGIN, xaxis_title="Spot move"
+    title = f"P&L at {horizon:%d %b %y}: " + (
+        "spot move (no vol exposure left by then)" if flat else "spot move against vol shift"
     )
+    fig.update_layout(title=title, margin=MARGIN, xaxis_title="Spot move")
     return fig
 
 

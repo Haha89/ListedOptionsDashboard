@@ -8,6 +8,9 @@ In order: each step relies on the ones before.
   closed). Excluded quotes show as hollow markers on the smile.
 - T runs to 16:00 New York, 09:30 for third-Friday SPX / NDX / RUT monthlies. Where one date lists an AM root and a
   PM one (SPX / SPXW), the PM contracts are kept.
+- Put-call parity: a call/put pair whose bid/ask can't reach the expiry's forward within 0.25% is stale, both quotes
+  unusable (NDX flags 63 -> 21, SPY 19 -> 5). The forward is the median over the 9 pairs nearest spot. The Parity
+  tab shows the implied forward, yield and dividends per expiry against the trailing dividend yield.
 - Not done: excluding quotes by trade age (`lastTradeDate`). Long-dated options with tight live quotes often go days
   without a trade, and the spread rule already drops minimum-tick quotes.
 
@@ -33,18 +36,32 @@ tests. theta is the market ATM total variance; errors are weighted by (vega / ha
 - Next: let theta float per expiry, or SVI (5 parameters) for the front expiries; interpolate between expiries in
   total variance for a continuous surface.
 
-## 4. History
+## 4. Hard-to-borrow signal
+The Parity tab's "Borrow" column (implied yield - trailing dividend yield) is the options market's view: when shares
+are hard to short, conversions can't be done, puts stay rich against calls and the forward sits below what
+dividends explain. Easy-to-borrow names show about 0 to -1% (we discount at the T-bill, the market funds a bit
+above); a hard-to-borrow one, a steady positive spread across the 1-6 month expiries.
+- Borrow signal: the median implied borrow over the 1-6 month expiries, flagged above about 2%; front weeklies are
+  left out, a cent of forward over a session or two is tens of percent of yield.
+- Short interest from yfinance (`Ticker.info`: short % of float, days to cover, change on the month). Published
+  twice a month, so it lags, but it confirms a crowded short.
+- Borrow fee and shares available: Interactive Brokers publishes a free daily file of shortable shares and
+  indicative fees per US stock (public FTP). An actual cost to compare with the implied one.
+- Caveats: a dividend cut, raise or special dividend reads as borrow against the trailing yield; early exercise of
+  American puts on hard-to-borrow names hides part of the signal.
+
+## 5. History
 - Store each snapshot (DuckDB or SQLite file): spot, forward, rate, fitted parameters, ATM / RR / BF per expiry.
 - Time series of ATM vol, 25Δ RR and 25Δ BF; term structure today against N days ago.
 - Realized vs implied vol (close-to-close or Parkinson from yfinance history).
 
-## 5. Models and products
+## 6. Models and products
 - American options: implied vol by inverting a binomial tree with early exercise (`binomial/pricer.py`, to extend to
   puts and early exercise), at least for single stocks.
 - Options on futures (e.g. heating oil HO): Black-76, and a data source other than Yahoo, which doesn't list them.
   `snippets/cme_settlements.py` fetches CME futures settlements.
 - Dividends: discrete dividends instead of a continuous yield, for names that pay quarterly.
 
-## 6. Engineering
+## 7. Engineering
 - Rate curve (Treasury) instead of a single 13-week T-bill rate.
 - Shared cache (flask-caching / Redis) if the dashboard is served to several users.

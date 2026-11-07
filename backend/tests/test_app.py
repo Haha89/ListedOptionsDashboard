@@ -1,6 +1,6 @@
 """Dashboard data path: pricing a chain, filtering it and building the surface, with Yahoo replaced by a fake"""
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -355,3 +355,11 @@ def test_strategy_on_essvi_vols_matches_own_vols_on_a_flat_smile():
     fitted = app.fit_for("TEST", 6, 50)
     own, fit = strategy.value(priced, [90.0, 100.0, 110.0]), strategy.value(priced, [90.0, 100.0, 110.0], fitted=fitted)
     assert fit == pytest.approx(own, abs=0.5)  # $ on a position of 4 contracts
+
+
+def test_scenarios_drop_the_vol_axis_once_every_option_has_expired():
+    priced = legs_of("Call calendar")
+    near, far = priced["T"].min(), priced["T"].max()
+    assert len(app.scenario_chart(priced, 100.0, date.today(), near).data[0].y) == 5  # far leg still alive
+    expired = app.scenario_chart(priced, 100.0, date.today(), far).data[0]
+    assert list(expired.y) == ["any vol"] and np.shape(expired.z) == (1, 9)
