@@ -1,13 +1,15 @@
 """Black-Scholes, implied vol and binomial checks against textbook values and no-arbitrage identities"""
 
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from src.option_vol.binomial.pricer import price_call
 from src.option_vol.models import Call, Environment, Put
-from src.option_vol.models.base_option import NEW_YORK
+from src.option_vol.models.base_option import CLOSE, NEW_YORK, OPEN, _holidays, year_fraction
 
 SPOT, RATE = 100.0, 0.05
 
@@ -22,12 +24,44 @@ def market(monkeypatch):
 def make(cls, strike=100.0, days=365, price=None, vol=None):
     """Option on TEST expiring in `days` calendar days (365 days = 1 year), optionally with a set implied vol"""
     option = cls(strike, datetime.now(NEW_YORK).date() + timedelta(days=days), "TEST", price)
+    option.T = days / 365  # whole days, so textbook values hold whatever the time of day
     option.implied_vol = vol
     return option
 
 
-def test_one_year_is_one_year():
-    assert make(Call).T == 1.0
+def ny(*args):
+    return datetime(*args, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize(
+    "now, maturity, expires_at, sessions",
+    [
+        (ny(2026, 11, 6, 19, 46), date(2026, 11, 9), CLOSE, 1.0),  # Friday evening to Monday close: one session
+        (ny(2026, 11, 11, 12, 45), date(2026, 11, 11), CLOSE, 0.5),  # half of today's session left
+        (ny(2026, 11, 9, 8, 0), date(2026, 11, 13), CLOSE, 5.0),  # before Monday's open to Friday's close
+        (ny(2026, 11, 25, 16, 0), date(2026, 11, 27), CLOSE, 1.0),  # Thanksgiving in between
+        (ny(2026, 11, 19, 12, 45), date(2026, 11, 20), OPEN, 0.5),  # AM-settled: the expiry day's session doesn't count
+        (ny(2026, 11, 19, 17, 0), date(2026, 11, 20), OPEN, 1 / 6.5),  # nothing left: floored at one hour
+        (ny(2026, 11, 6, 19, 46), date(2027, 11, 5), CLOSE, 250.0),  # a year: 260 weekdays less 10 NYSE holidays
+    ],
+)
+def test_time_to_expiry_is_trading_time(now, maturity, expires_at, sessions):
+    assert year_fraction(maturity, expires_at, now) == pytest.approx(sessions / 252)
+
+
+@pytest.mark.parametrize(
+    "day, closed",
+    [
+        (date(2027, 3, 26), True),  # Good Friday
+        (date(2026, 12, 25), True),
+        (date(2027, 1, 1), True),
+        (date(2026, 7, 3), True),  # July 4th on a Saturday: closed the Friday before
+        (date(2027, 12, 31), False),  # New Year on a Saturday: the NYSE stays open on Friday
+        (date(2026, 11, 11), False),  # Veterans Day: banks close, the NYSE doesn't
+    ],
+)
+def test_nyse_holidays(day, closed):
+    assert (not np.is_busday(day, holidays=_holidays())) is closed
 
 
 # Hull, S=K=100, r=5%, vol=20%, T=1y: call 10.4506, put 5.5735
@@ -70,12 +104,12 @@ def test_implied_vol_is_nan_when_no_vol_matches(cls, strike, price):
     assert math.isnan(make(cls, strike, price=price).set_implied_volatility())
 
 
-# Same textbook option: theta per calendar day (annual / 365), rho per 1% rate move, vega per 1.00 of vol
+# Same textbook option: theta per trading day (annual / 252), rho per 1% rate move, vega per 1.00 of vol
 @pytest.mark.parametrize(
     "cls, delta, theta, rho",
     [
-        (Call, 0.636831, -6.414028 / 365, 0.532325),
-        (Put, -0.363169, -1.657880 / 365, -0.418905),
+        (Call, 0.636831, -6.414028 / 252, 0.532325),
+        (Put, -0.363169, -1.657880 / 252, -0.418905),
     ],
 )
 def test_greeks_textbook_values(cls, delta, theta, rho):
@@ -115,3 +149,13 @@ def test_binomial_one_step_by_hand():
     p = (math.exp(RATE) - 1 / u) / (u - 1 / u)
     expected = math.exp(-RATE) * p * (SPOT * u - 100)
     assert price_call(make(Call), vol=0.2, periods=1) == pytest.approx(expected, abs=1e-12)
+
+
+def test_trailing_dividend_yield(monkeypatch):
+    from src.option_vol.models import environment
+
+    today = pd.Timestamp.now(tz="America/New_York").normalize()
+    paid = pd.Series([0.5, 0.5, 0.5], index=[today - pd.Timedelta(days=d) for d in (400, 200, 20)])
+    monkeypatch.setattr(environment, "Ticker", lambda symbol: type("T", (), {"dividends": paid})())
+    assert Environment.get_dividend_yield("TEST") == pytest.approx(1.0 / SPOT)  # the 400-day-old one is out
+    assert math.isnan(Environment.get_dividend_yield("SPX"))

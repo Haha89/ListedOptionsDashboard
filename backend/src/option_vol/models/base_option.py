@@ -1,11 +1,77 @@
-from datetime import date, datetime
+import math
+from datetime import date, datetime, time, timedelta
+from functools import cache
 from zoneinfo import ZoneInfo
+
+import numpy as np
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar,
+    GoodFriday,
+    Holiday,
+    USLaborDay,
+    USMartinLutherKingJr,
+    USMemorialDay,
+    USPresidentsDay,
+    USThanksgivingDay,
+    nearest_workday,
+    sunday_to_monday,
+)
 
 from src.option_vol import black_scholes as bs
 from src.option_vol.models import Environment
 from src.option_vol.utils import display_options
 
 NEW_YORK = ZoneInfo("America/New_York")
+CLOSE, OPEN = time(16), time(9, 30)  # US listed options expire at the close; AM-settled index monthlies at the open
+TRADING_DAYS = 252  # sessions per year
+SESSION = 6.5 * 3600  # seconds, 09:30 to 16:00
+
+
+class NYSEHolidays(AbstractHolidayCalendar):
+    """Days the NYSE is closed. shortcut: early closes (13:00 after Thanksgiving, on Christmas Eve) count as full
+    sessions, and one-off closures (national days of mourning) are missing; add them if a front expiry falls there"""
+
+    rules = [  # noqa: RUF012  (pandas reads rules as a class attribute)
+        Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),  # Saturday: no Friday holiday
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        Holiday("Juneteenth", month=6, day=19, start_date="2022-01-01", observance=nearest_workday),
+        Holiday("Independence Day", month=7, day=4, observance=nearest_workday),
+        USLaborDay,
+        USThanksgivingDay,
+        Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+    ]
+
+
+@cache
+def _holidays() -> np.ndarray:
+    return NYSEHolidays().holidays("2000-01-01", "2060-12-31").to_numpy().astype("datetime64[D]")
+
+
+def _session_part(day: date, start: datetime, end: datetime) -> float:
+    """Fraction of day's NYSE session between start and end"""
+    if not np.is_busday(day, holidays=_holidays()):
+        return 0.0
+    opened = max(datetime.combine(day, OPEN, NEW_YORK), start)
+    closed = min(datetime.combine(day, CLOSE, NEW_YORK), end)
+    return max((closed - opened).total_seconds(), 0.0) / SESSION
+
+
+def year_fraction(maturity: date, expires_at: time = CLOSE, now: datetime | None = None) -> float:
+    """Trading years from now to maturity at expires_at: the NYSE session time in between, over 252 sessions a year.
+    Variance accrues while the market trades, so a Monday expiry seen on Friday evening holds one session, not three
+    calendar days: in calendar time its vol would read about 30% low."""
+    now = now or datetime.now(NEW_YORK)
+    expiry = datetime.combine(maturity, expires_at, NEW_YORK)
+    sessions = _session_part(now.date(), now, expiry)
+    if maturity > now.date():
+        between = np.busday_count(now.date() + timedelta(days=1), maturity, holidays=_holidays())
+        sessions += between + _session_part(maturity, now, expiry)
+    # shortcut: AM-settled options seen after the last close before settlement have no session left; count one hour so
+    # vols stay finite. Weight overnight variance properly if those options matter.
+    return max(sessions, 1 / 6.5) / TRADING_DAYS
 
 
 class BaseOption:
@@ -13,7 +79,7 @@ class BaseOption:
 
     is_call: bool
 
-    def __init__(self, strike: float, maturity: date, underlying: str, price=None):
+    def __init__(self, strike: float, maturity: date, underlying: str, price=None, expires_at: time = CLOSE):
         self.type = self.__class__.__name__
         self.underlying = underlying
         self.strike = strike
@@ -22,7 +88,12 @@ class BaseOption:
 
         self.name = self.get_name()
         self.implied_vol = None
-        self.T = (self.maturity - datetime.now(NEW_YORK).date()).days / 365  # calendar days -> years
+        self.expires_at = expires_at
+        # shortcut: one clock, trading time, also discounts at r; vs calendar time the gap is a few days of interest
+        # over the option's life, which the implied dividend yield (app.implied_yield) absorbs into the forward
+        self.T = year_fraction(maturity, expires_at)
+        self.bid = self.ask = math.nan  # nan when there is no two-sided quote
+        self.volume = self.open_interest = 0
         self.r = Environment().get_risk_free_rate()
         self.spot = Environment().get_spot(self.underlying)
         self.div_yield = 0  # Environment().get_div_yield(self.underlying)

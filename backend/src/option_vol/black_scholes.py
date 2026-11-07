@@ -1,5 +1,6 @@
 """Black-Scholes prices, greeks and implied vol. Every argument can be a scalar or a numpy array (they broadcast).
-Conventions: T in years, r and q continuous rates, vega per 1.00 of vol, theta per calendar day, rho per 1% of rate."""
+Conventions: T in trading years (252 sessions), r and q continuous rates, vega per 1.00 of vol, theta per trading day,
+rho per 1% of rate."""
 
 import numpy as np
 from scipy.special import ndtr  # standard normal cdf
@@ -34,7 +35,7 @@ def greeks(S, K, T, r, vol, is_call, q=0.0) -> dict:
             - w * r * K * disc_r * ndtr(w * d2)
             + w * q * S * disc_q * ndtr(w * d1)
         )
-        / 365,
+        / 252,
         "rho": w * K * T * disc_r * ndtr(w * d2) / 100,
     }
 
